@@ -3,6 +3,7 @@
 #include <omnetpp.h>
 
 #include "inet/common/INETMath.h"
+#include "inet/common/InitStages.h"
 
 namespace uavminedetection {
 
@@ -12,7 +13,7 @@ void LawnmowerMobility::initialize(int stage)
 {
     LineSegmentsMobilityBase::initialize(stage);
 
-    if (stage == INITSTAGE_LOCAL) {
+    if (stage == inet::INITSTAGE_LOCAL) {
         speed = par("speed");
         x1 = par("x1");
         y1 = par("y1");
@@ -23,9 +24,9 @@ void LawnmowerMobility::initialize(int stage)
         step = 0;
 
         if (speed <= 0)
-            throw cRuntimeError("LawnmowerMobility: speed must be > 0");
+            throw omnetpp::cRuntimeError("LawnmowerMobility: speed must be > 0");
         if (rowCount <= 0)
-            throw cRuntimeError("LawnmowerMobility: rowCount must be > 0");
+            throw omnetpp::cRuntimeError("LawnmowerMobility: rowCount must be > 0");
     }
 }
 
@@ -58,7 +59,7 @@ void LawnmowerMobility::setTargetPosition()
     step++;
     targetPosition = lastPosition + positionDelta;
     targetPosition.z = altitude;
-    nextChange = simTime() + positionDelta.length() / speed;
+    nextChange = omnetpp::simTime() + positionDelta.length() / speed;
 }
 
 } // namespace uavminedetection
