@@ -133,7 +133,7 @@ void MineDetectionApp::initSensorVisuals()
     sensorBarFg->setBounds(cFigure::Rectangle(cx-12, cy+14, 2, 4));
     sensorBarFg->setFilled(true);
     sensorBarFg->setFillColor(cFigure::Color(0, 100, 255));
-    sensorBarFg->setLineWidth(0);
+    sensorBarFg->setLineWidth(1);
     canvas->addFigure(sensorBarFg);
 }
 
