@@ -36,6 +36,7 @@ void MineDetectionApp::initialize(int stage)
         magneticThreshold  = par("magneticThreshold");
         magneticSaturation = par("magneticSaturation");
         falseAlarmProb     = par("falseAlarmProb");
+        falseAlarmDisplayLimit = par("falseAlarmDisplayLimit");
         confirmRadius      = par("confirmRadius");
         destPort           = par("destPort");
         localPort          = par("localPort");
@@ -393,6 +394,10 @@ double MineDetectionApp::calculateCoverage()
 // ============================================================
 void MineDetectionApp::addFalseAlarmFigure(double x, double y)
 {
+    if (falseAlarmDisplayLimit >= 0 &&
+        falseAlarmFigureCount >= falseAlarmDisplayLimit)
+        return;
+
     cCanvas    *canvas = getSystemModule()->getCanvas();
     std::string name   = "fa_" + std::to_string(uavId)
                        + "_" + std::to_string(falseAlarmFigureCount++);

@@ -23,6 +23,7 @@ class MineDetectionApp : public ApplicationBase,
     double magneticThreshold;
     double magneticSaturation;
     double falseAlarmProb;
+    int    falseAlarmDisplayLimit;
     double confirmRadius;
     int    destPort;
     int    localPort;
