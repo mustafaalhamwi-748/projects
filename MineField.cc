@@ -8,7 +8,7 @@ namespace uavminedetection {
 Define_Module(MineField);
 
 // ============================================================
-// initialize — وضع الألغام ورسمها
+// initialize
 // ============================================================
 void MineField::initialize()
 {
@@ -16,9 +16,9 @@ void MineField::initialize()
     backgroundNoise  = par("backgroundNoise");
     noiseVariation   = par("noiseVariation");
 
-    // ── 20 لغماً موزعاً على منطقة 1000×1000 ──────────────
-    // هذه هي الحقيقة — الطائرات لا تعرفها مسبقاً
-    struct { double x, y; } pos[] = {
+    // ── 24 لغماً حقيقياً بمواضع استراتيجية ───────────────
+    // موزعة على كامل المنطقة 1000×1000
+    struct { double x, y; } minePos[] = {
         {  80,  120}, { 220,  75}, { 380, 160}, { 530,  90},
         { 670, 190}, { 820, 110}, { 950, 210}, { 140, 310},
         { 290, 370}, { 460, 290}, { 610, 340}, { 760, 400},
@@ -27,55 +27,142 @@ void MineField::initialize()
         { 340, 760}, { 510, 820}, { 680, 770}, { 840, 840}
     };
 
-    int n = (int)(sizeof(pos) / sizeof(pos[0]));
+    int nm = (int)(sizeof(minePos) / sizeof(minePos[0]));
     mines.clear();
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < nm; i++) {
         MinePos m;
-        m.x = pos[i].x;
-        m.y = pos[i].y;
+        m.x = minePos[i].x;
+        m.y = minePos[i].y;
         m.discovered = false;
         mines.push_back(m);
     }
 
+    // ── 50 قطعة معدنية عشوائية ────────────────────────────
+    // بقايا معدات زراعية، مسامير، أسلاك، علب
+    // قوتها المغناطيسية أضعف من الألغام
+    struct { double x, y; MetalType t; double str; } debrisPos[] = {
+        // مسامير صغيرة (nail) — قوة منخفضة جداً
+        { 45,  200, NAIL,      15.0},
+        {165,  430, NAIL,      12.0},
+        {310,  180, NAIL,      18.0},
+        {480,  650, NAIL,      14.0},
+        {620,  430, NAIL,      16.0},
+        {750,  280, NAIL,      13.0},
+        {880,  710, NAIL,      17.0},
+        {120,  860, NAIL,      11.0},
+        {390,  940, NAIL,      15.0},
+        {710,  590, NAIL,      14.0},
+        {830,  460, NAIL,      13.0},
+        {960,  780, NAIL,      16.0},
+        {200,  650, NAIL,      12.0},
+        {550,  150, NAIL,      15.0},
+        {670,  880, NAIL,      18.0},
+
+        // أسلاك (wire) — قوة منخفضة
+        { 70,  350, WIRE,      25.0},
+        {230,  500, WIRE,      22.0},
+        {400,  720, WIRE,      28.0},
+        {560,  310, WIRE,      24.0},
+        {720,  640, WIRE,      26.0},
+        {890,  380, WIRE,      23.0},
+        {150,  740, WIRE,      27.0},
+        {470,  880, WIRE,      21.0},
+        {800,  150, WIRE,      25.0},
+        {340,  430, WIRE,      24.0},
+
+        // علب معدنية (can) — قوة متوسطة
+        {110,  600, CAN,       40.0},
+        {280,  250, CAN,       38.0},
+        {440,  580, CAN,       42.0},
+        {590,  720, CAN,       39.0},
+        {760,  490, CAN,       41.0},
+        {920,  650, CAN,       37.0},
+        {350,  870, CAN,       43.0},
+        {640,  200, CAN,       40.0},
+        {190,  420, CAN,       38.0},
+        {780,  780, CAN,       41.0},
+
+        // بقايا معدات زراعية (tool_part) — قوة متوسطة
+        { 55,  780, TOOL_PART, 35.0},
+        {245,  130, TOOL_PART, 32.0},
+        {490,  400, TOOL_PART, 38.0},
+        {630,  560, TOOL_PART, 34.0},
+        {870,  250, TOOL_PART, 36.0},
+        {130,  320, TOOL_PART, 33.0},
+        {510,  700, TOOL_PART, 37.0},
+        {720,  900, TOOL_PART, 35.0},
+        {380,  320, TOOL_PART, 32.0},
+        {850,  580, TOOL_PART, 36.0},
+        {200,  900, TOOL_PART, 34.0},
+        {450,  200, TOOL_PART, 33.0},
+        {700,  350, TOOL_PART, 37.0},
+        {950,  490, TOOL_PART, 35.0},
+        { 90,  470, TOOL_PART, 38.0}
+    };
+
+    int nd = (int)(sizeof(debrisPos) / sizeof(debrisPos[0]));
+    debris.clear();
+    for (int i = 0; i < nd; i++) {
+        MetalDebris d;
+        d.x = debrisPos[i].x;
+        d.y = debrisPos[i].y;
+        d.type = debrisPos[i].t;
+        d.magneticStrength = debrisPos[i].str;
+        d.triggered = false;
+        debris.push_back(d);
+    }
+
+    // رسم البيئة
+    drawFarmBackground();
     createMineVisuals();
+    createDebrisVisuals();
     addLegend();
 
-    EV_INFO << "MineField: " << n
-            << " mines placed secretly in 1000x1000m area.\n";
+    EV_INFO << "MineField: " << nm << " mines + "
+            << nd << " metal debris placed.\n";
 }
 
 // ============================================================
-// getMagneticValue — القانون الفيزيائي
+// getMagneticValue — قانون MAD مع تأثير القطع المعدنية
 //
-// القيمة الكلية = ضوضاء الخلفية + مجموع تأثير كل الألغام
-// تأثير لغم واحد = k / (d² + 1)
-//
-// المعادلة مشتقة من قانون التناقص مع المسافة للمجال المغناطيسي
-// عند d=0  → تأثير أقصى = k
-// عند d=10 → k/101  ← عند العتبة 500: k=50500
-// عند d=15 → k/226  ← تحت العتبة
+// يأخذ MAX بدلاً من SUM لتجنب التراكم الكاذب
+// الألغام: تأثير k/d² (أقوى)
+// القطع المعدنية: تأثير أضعف بكثير
 // ============================================================
 double MineField::getMagneticValue(double uavX, double uavY) const
 {
-    // ضوضاء الخلفية المغناطيسية للتربة
-    double value = backgroundNoise
+    double noise = backgroundNoise
                  + uniform(-noiseVariation / 2.0, noiseVariation / 2.0);
 
-    // مجموع تأثير كل الألغام
+    // ── تأثير الألغام الحقيقية (MAX) ───────────────────────
+    double mineEffect = 0.0;
     for (const auto& mine : mines) {
         double dx = uavX - mine.x;
         double dy = uavY - mine.y;
         double d2 = dx*dx + dy*dy;
-        // القانون الفيزيائي: يتناقص مع مربع المسافة
-        value += magneticConstant / (d2 + 1.0);
+        double e  = magneticConstant / (d2 + 1.0);
+        if (e > mineEffect) mineEffect = e;
     }
 
-    return value;
+    // ── تأثير القطع المعدنية (MAX) ─────────────────────────
+    // أضعف بكثير من الألغام لكن قد ترفع القيمة قليلاً
+    double debrisEffect = 0.0;
+    for (const auto& d : debris) {
+        double dx = uavX - d.x;
+        double dy = uavY - d.y;
+        double d2 = dx*dx + dy*dy;
+        // القطع المعدنية لها ثابت أصغر بكثير من الألغام
+        double debrisK = magneticConstant * (d.magneticStrength / 500.0);
+        double e = debrisK / (d2 + 1.0);
+        if (e > debrisEffect) debrisEffect = e;
+    }
+
+    // الإجمالي = ضوضاء + أقوى تأثير (لغم أو قطعة معدنية)
+    return noise + std::max(mineEffect, debrisEffect);
 }
 
 // ============================================================
 // getNearestUndiscoveredMine
-// يُستدعى فقط عند قراءة عالية — الطائرة لا تعرف المواقع مسبقاً
 // ============================================================
 int MineField::getNearestUndiscoveredMine(double x, double y,
                                            double radius) const
@@ -84,7 +171,7 @@ int MineField::getNearestUndiscoveredMine(double x, double y,
     double bestDist = radius;
 
     for (int i = 0; i < (int)mines.size(); i++) {
-        if (mines[i].discovered) continue;   // مكتشف مسبقاً
+        if (mines[i].discovered) continue;
         double d = sqrt(pow(x - mines[i].x, 2) +
                         pow(y - mines[i].y, 2));
         if (d < bestDist) {
@@ -96,12 +183,35 @@ int MineField::getNearestUndiscoveredMine(double x, double y,
 }
 
 // ============================================================
-// markDiscovered — تُستدعى عند تأكيد اكتشاف لغم
+// getNearestMetalDebris — أقرب قطعة معدنية ضمن radius
 // ============================================================
+int MineField::getNearestMetalDebris(double x, double y,
+                                      double radius) const
+{
+    int    best     = -1;
+    double bestDist = radius;
+
+    for (int i = 0; i < (int)debris.size(); i++) {
+        double d = sqrt(pow(x - debris[i].x, 2) +
+                        pow(y - debris[i].y, 2));
+        if (d < bestDist) {
+            bestDist = d;
+            best     = i;
+        }
+    }
+    return best;
+}
+
 void MineField::markDiscovered(int index)
 {
     if (index >= 0 && index < (int)mines.size())
         mines[index].discovered = true;
+}
+
+void MineField::markDebrisTriggered(int index)
+{
+    if (index >= 0 && index < (int)debris.size())
+        debris[index].triggered = true;
 }
 
 int MineField::getDiscoveredCount() const
@@ -113,14 +223,61 @@ int MineField::getDiscoveredCount() const
 }
 
 // ============================================================
-// createMineVisuals — رسم الألغام على Canvas
+// drawFarmBackground — رسم بيئة الأرض الزراعية
+// خطوط حراثة أفقية + لون بني للتربة
+// ============================================================
+void MineField::drawFarmBackground()
+{
+    cCanvas *canvas = getSystemModule()->getCanvas();
+
+    // ── خلفية التربة البنية ────────────────────────────────
+    auto *bg = new cRectangleFigure("farmBg");
+    bg->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
+    bg->setFilled(true);
+    bg->setFillColor(cFigure::Color(180, 140, 90));  // بني فاتح
+    bg->setLineWidth(0);
+    canvas->addFigure(bg);
+
+    // ── خطوط الحراثة الأفقية ──────────────────────────────
+    // كل 50 متر خط حراثة أغمق قليلاً
+    for (int y = 0; y <= 1000; y += 50) {
+        auto *line = new cLineFigure(
+            ("furrow_" + std::to_string(y)).c_str());
+        line->setStart(cFigure::Point(0, y));
+        line->setEnd(cFigure::Point(1000, y));
+        line->setLineColor(cFigure::Color(155, 118, 70));
+        line->setLineWidth(1);
+        line->setLineOpacity(0.5);
+        canvas->addFigure(line);
+    }
+
+    // ── حدود المنطقة ──────────────────────────────────────
+    auto *border = new cRectangleFigure("border");
+    border->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
+    border->setFilled(false);
+    border->setLineColor(cFigure::Color(100, 70, 30));
+    border->setLineWidth(3);
+    canvas->addFigure(border);
+
+    // ── تسمية المنطقة ──────────────────────────────────────
+    auto *areaLbl = new cTextFigure("areaLabel");
+    areaLbl->setPosition(cFigure::Point(500, 15));
+    areaLbl->setText("Agricultural Field — 1km x 1km | MAD Mine Detection");
+    areaLbl->setColor(cFigure::Color(60, 40, 10));
+    areaLbl->setAnchor(cFigure::ANCHOR_N);
+    areaLbl->setFont(cFigure::Font("", 9, cFigure::FONT_BOLD));
+    canvas->addFigure(areaLbl);
+}
+
+// ============================================================
+// createMineVisuals — رسم الألغام الحقيقية (أحمر)
 // ============================================================
 void MineField::createMineVisuals()
 {
-    cCanvas       *canvas = getSystemModule()->getCanvas();
-    const double   R      = 7.0;
-    const double   Rsp    = 3.0;
-    const double   spOff[4][2] = {
+    cCanvas      *canvas = getSystemModule()->getCanvas();
+    const double  R      = 7.0;
+    const double  Rsp    = 3.0;
+    const double  spOff[4][2] = {
         { 0, -R-Rsp}, { 0, R+Rsp}, { R+Rsp, 0}, {-R-Rsp, 0}
     };
 
@@ -169,13 +326,59 @@ void MineField::createMineVisuals()
         canvas->addFigure(grp);
         mineFigures.push_back(grp);
     }
-
-    EV_INFO << "MineField: " << mineFigures.size()
-            << " mine figures drawn on canvas.\n";
 }
 
 // ============================================================
-// addLegend
+// createDebrisVisuals — رسم القطع المعدنية العشوائية
+// كل نوع له شكل مختلف (مربع صغير رمادي)
+// ============================================================
+void MineField::createDebrisVisuals()
+{
+    cCanvas *canvas = getSystemModule()->getCanvas();
+    debrisFigures.clear();
+
+    for (size_t i = 0; i < debris.size(); i++) {
+        double cx = debris[i].x;
+        double cy = debris[i].y;
+
+        auto *grp = new cGroupFigure(
+            ("debris_" + std::to_string(i)).c_str());
+
+        // شكل القطعة المعدنية: مربع صغير رمادي
+        double sz = 4.0;
+        auto *sq = new cRectangleFigure("sq");
+        sq->setBounds(cFigure::Rectangle(cx-sz, cy-sz, 2*sz, 2*sz));
+        sq->setFilled(true);
+
+        // لون حسب النوع
+        switch (debris[i].type) {
+            case NAIL:
+                sq->setFillColor(cFigure::Color(160, 160, 160)); // رمادي
+                break;
+            case WIRE:
+                sq->setFillColor(cFigure::Color(140, 140, 100)); // رمادي مصفر
+                break;
+            case CAN:
+                sq->setFillColor(cFigure::Color(180, 130, 80));  // بني
+                break;
+            case TOOL_PART:
+                sq->setFillColor(cFigure::Color(120, 100, 80));  // بني داكن
+                break;
+        }
+        sq->setLineColor(cFigure::Color(80, 80, 80));
+        sq->setLineWidth(1);
+        grp->addFigure(sq);
+
+        canvas->addFigure(grp);
+        debrisFigures.push_back(grp);
+    }
+
+    EV_INFO << "MineField: " << debrisFigures.size()
+            << " metal debris drawn.\n";
+}
+
+// ============================================================
+// addLegend — وسيلة إيضاح شاملة
 // ============================================================
 void MineField::addLegend()
 {
@@ -184,19 +387,19 @@ void MineField::addLegend()
 
     // الخلفية
     auto *bg = new cRectangleFigure("bg");
-    bg->setBounds(cFigure::Rectangle(5, 1010, 230, 72));
+    bg->setBounds(cFigure::Rectangle(5, 1008, 310, 115));
     bg->setFilled(true);
-    bg->setFillColor(cFigure::Color(245, 245, 245));
-    bg->setFillOpacity(0.88);
-    bg->setLineColor(cFigure::Color(100, 100, 100));
-    bg->setLineWidth(1);
+    bg->setFillColor(cFigure::Color(245, 240, 225));
+    bg->setFillOpacity(0.92);
+    bg->setLineColor(cFigure::Color(100, 80, 40));
+    bg->setLineWidth(2);
     lg->addFigure(bg);
 
     // العنوان
     auto *ttl = new cTextFigure("ttl");
-    ttl->setPosition(cFigure::Point(120, 1022));
-    ttl->setText("Magnetometer Legend");
-    ttl->setColor(cFigure::Color("black"));
+    ttl->setPosition(cFigure::Point(160, 1020));
+    ttl->setText("MAD System Legend — Agricultural Field");
+    ttl->setColor(cFigure::Color(60, 40, 10));
     ttl->setAnchor(cFigure::ANCHOR_CENTER);
     ttl->setFont(cFigure::Font("", 8, cFigure::FONT_BOLD));
     lg->addFigure(ttl);
@@ -204,33 +407,47 @@ void MineField::addLegend()
     // الصفوف
     struct {
         int    y1, y2;
-        uint8_t fr,fg,fb, lr,lg_,lb;
+        bool   isRect;
+        uint8_t fr,fg,fb;
         const char *txt;
     } rows[] = {
-        {1030,1037,  220,  0,  0,  120,  0,  0,
-            "Undiscovered Mine"},
-        {1048,1055,    0,210,  0,    0,100,  0,
-            "Discovered Mine (Magnetometer)"},
-        {1066,1073,  255,220,  0,  180,130,  0,
-            "False Alarm (Noise Spike)"}
+        {1028, 1035, false, 220,  0,  0,
+            "Real Mine (undiscovered)"},
+        {1046, 1053, false,   0,210,  0,
+            "Real Mine (discovered by MAD)"},
+        {1064, 1071, false, 255,220,  0,
+            "False Alarm (metal debris detected)"},
+        {1082, 1089, true,  160,160,160,
+            "Metal Debris (nails/wires/cans/tools)"}
     };
 
-    for (int r = 0; r < 3; r++) {
-        auto *dot = new cOvalFigure(
-            ("ld" + std::to_string(r)).c_str());
-        dot->setBounds(cFigure::Rectangle(12, rows[r].y1, 12, 12));
-        dot->setFilled(true);
-        dot->setFillColor(
-            cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
-        dot->setLineColor(
-            cFigure::Color(rows[r].lr, rows[r].lg_, rows[r].lb));
-        lg->addFigure(dot);
+    for (int r = 0; r < 4; r++) {
+        if (rows[r].isRect) {
+            auto *sq = new cRectangleFigure(
+                ("ld" + std::to_string(r)).c_str());
+            sq->setBounds(cFigure::Rectangle(12, rows[r].y1, 12, 12));
+            sq->setFilled(true);
+            sq->setFillColor(
+                cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
+            sq->setLineColor(cFigure::Color(80, 80, 80));
+            lg->addFigure(sq);
+        } else {
+            auto *dot = new cOvalFigure(
+                ("ld" + std::to_string(r)).c_str());
+            dot->setBounds(
+                cFigure::Rectangle(12, rows[r].y1, 12, 12));
+            dot->setFilled(true);
+            dot->setFillColor(
+                cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
+            dot->setLineColor(cFigure::Color(80, 80, 80));
+            lg->addFigure(dot);
+        }
 
         auto *txt = new cTextFigure(
             ("lt" + std::to_string(r)).c_str());
         txt->setPosition(cFigure::Point(30, rows[r].y2));
         txt->setText(rows[r].txt);
-        txt->setColor(cFigure::Color("black"));
+        txt->setColor(cFigure::Color(40, 30, 10));
         txt->setAnchor(cFigure::ANCHOR_W);
         txt->setFont(cFigure::Font("", 8, 0));
         lg->addFigure(txt);
@@ -240,19 +457,19 @@ void MineField::addLegend()
 }
 
 // ============================================================
-// refreshDisplay — تحديث ألوان الألغام (أحمر → أخضر عند الاكتشاف)
+// refreshDisplay
 // ============================================================
 void MineField::refreshDisplay() const
 {
+    // تحديث ألوان الألغام: أحمر → أخضر عند الاكتشاف
     for (size_t i = 0;
          i < mineFigures.size() && i < mines.size(); i++)
     {
         if (!mineFigures[i]) continue;
 
         cFigure::Color fill = mines[i].discovered
-            ? cFigure::Color(0, 210, 0)    // أخضر: مكتشف
-            : cFigure::Color(220, 0, 0);   // أحمر: غير مكتشف
-
+            ? cFigure::Color(0, 210, 0)
+            : cFigure::Color(220, 0, 0);
         cFigure::Color line = mines[i].discovered
             ? cFigure::Color(0, 100, 0)
             : cFigure::Color(120, 0, 0);
@@ -263,7 +480,6 @@ void MineField::refreshDisplay() const
             if (oval) {
                 oval->setFillColor(fill);
                 oval->setLineColor(line);
-
             }
         }
     }
