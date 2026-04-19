@@ -235,7 +235,7 @@ void MineField::drawFarmBackground()
     bg->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
     bg->setFilled(true);
     bg->setFillColor(cFigure::Color(180, 140, 90));  // بني فاتح
-    bg->setLineWidth(0);
+    bg->setLineWidth(1);
     canvas->addFigure(bg);
 
     // ── خطوط الحراثة الأفقية ──────────────────────────────
