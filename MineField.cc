@@ -230,27 +230,6 @@ void MineField::drawFarmBackground()
 {
     cCanvas *canvas = getSystemModule()->getCanvas();
 
-    // ── خلفية التربة البنية ────────────────────────────────
-    auto *bg = new cRectangleFigure("farmBg");
-    bg->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
-    bg->setFilled(true);
-    bg->setFillColor(cFigure::Color(180, 140, 90));  // بني فاتح
-    bg->setLineWidth(1);
-    canvas->addFigure(bg);
-
-    // ── خطوط الحراثة الأفقية ──────────────────────────────
-    // كل 50 متر خط حراثة أغمق قليلاً
-    for (int y = 0; y <= 1000; y += 50) {
-        auto *line = new cLineFigure(
-            ("furrow_" + std::to_string(y)).c_str());
-        line->setStart(cFigure::Point(0, y));
-        line->setEnd(cFigure::Point(1000, y));
-        line->setLineColor(cFigure::Color(155, 118, 70));
-        line->setLineWidth(1);
-        line->setLineOpacity(0.5);
-        canvas->addFigure(line);
-    }
-
     // ── حدود المنطقة ──────────────────────────────────────
     auto *border = new cRectangleFigure("border");
     border->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
