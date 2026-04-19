@@ -230,14 +230,6 @@ void MineField::drawFarmBackground()
 {
     cCanvas *canvas = getSystemModule()->getCanvas();
 
-    // ── حدود المنطقة ──────────────────────────────────────
-    auto *border = new cRectangleFigure("border");
-    border->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
-    border->setFilled(false);
-    border->setLineColor(cFigure::Color(100, 70, 30));
-    border->setLineWidth(3);
-    canvas->addFigure(border);
-
     // ── تسمية المنطقة ──────────────────────────────────────
     auto *areaLbl = new cTextFigure("areaLabel");
     areaLbl->setPosition(cFigure::Point(500, 15));
@@ -364,9 +356,9 @@ void MineField::addLegend()
     cCanvas *canvas = getSystemModule()->getCanvas();
     auto    *lg     = new cGroupFigure("legend");
 
-    // الخلفية
+    // الخلفية — خارج حدود المنطقة (يمين الحقل)
     auto *bg = new cRectangleFigure("bg");
-    bg->setBounds(cFigure::Rectangle(5, 1008, 310, 115));
+    bg->setBounds(cFigure::Rectangle(1030, 50, 310, 115));
     bg->setFilled(true);
     bg->setFillColor(cFigure::Color(245, 240, 225));
     bg->setFillOpacity(0.92);
@@ -376,7 +368,7 @@ void MineField::addLegend()
 
     // العنوان
     auto *ttl = new cTextFigure("ttl");
-    ttl->setPosition(cFigure::Point(160, 1020));
+    ttl->setPosition(cFigure::Point(1185, 62));
     ttl->setText("MAD System Legend — Agricultural Field");
     ttl->setColor(cFigure::Color(60, 40, 10));
     ttl->setAnchor(cFigure::ANCHOR_CENTER);
@@ -390,13 +382,13 @@ void MineField::addLegend()
         uint8_t fr,fg,fb;
         const char *txt;
     } rows[] = {
-        {1028, 1035, false, 220,  0,  0,
+        { 78,  85, false, 220,  0,  0,
             "Real Mine (undiscovered)"},
-        {1046, 1053, false,   0,210,  0,
+        { 96, 103, false,   0,210,  0,
             "Real Mine (discovered by MAD)"},
-        {1064, 1071, false, 255,220,  0,
+        {114, 121, false, 255,220,  0,
             "False Alarm (metal debris detected)"},
-        {1082, 1089, true,  160,160,160,
+        {132, 139, true,  160,160,160,
             "Metal Debris (nails/wires/cans/tools)"}
     };
 
@@ -404,7 +396,7 @@ void MineField::addLegend()
         if (rows[r].isRect) {
             auto *sq = new cRectangleFigure(
                 ("ld" + std::to_string(r)).c_str());
-            sq->setBounds(cFigure::Rectangle(12, rows[r].y1, 12, 12));
+            sq->setBounds(cFigure::Rectangle(1037, rows[r].y1, 12, 12));
             sq->setFilled(true);
             sq->setFillColor(
                 cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
@@ -414,7 +406,7 @@ void MineField::addLegend()
             auto *dot = new cOvalFigure(
                 ("ld" + std::to_string(r)).c_str());
             dot->setBounds(
-                cFigure::Rectangle(12, rows[r].y1, 12, 12));
+                cFigure::Rectangle(1037, rows[r].y1, 12, 12));
             dot->setFilled(true);
             dot->setFillColor(
                 cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
@@ -424,7 +416,7 @@ void MineField::addLegend()
 
         auto *txt = new cTextFigure(
             ("lt" + std::to_string(r)).c_str());
-        txt->setPosition(cFigure::Point(30, rows[r].y2));
+        txt->setPosition(cFigure::Point(1055, rows[r].y2));
         txt->setText(rows[r].txt);
         txt->setColor(cFigure::Color(40, 30, 10));
         txt->setAnchor(cFigure::ANCHOR_W);

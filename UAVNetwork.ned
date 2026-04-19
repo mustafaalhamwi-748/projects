@@ -19,8 +19,8 @@ network UAVMineDetection
         double areaX @unit(m) = default(1000m);
         double areaY @unit(m) = default(1000m);
 
-        // 1000px للمنطقة + 100px للـ legend في الأسفل
-        @display("bgb=1000,1100;bgc=#d8f0d8");
+        // الحقل 1000×1000 + مساحة legend على اليمين
+        @display("bgb=1400,1000;bgc=#d8f0d8");
 
     submodules:
         // ── وحدات البنية التحتية ───────────────────────────
@@ -47,6 +47,6 @@ network UAVMineDetection
 
         // ── محطة التحكم الأرضية ────────────────────────────
         gcs: AdhocHost {
-            @display("p=500,1060;i=device/antennatower;is=l;t=Ground Control Station");
+            @display("p=500,960;i=device/antennatower;is=l;t=Ground Control Station");
         }
 }
