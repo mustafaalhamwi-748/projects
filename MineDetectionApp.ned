@@ -33,6 +33,10 @@ simple MineDetectionApp like IApp
         // احتمال ضوضاء مغناطيسية تتجاوز العتبة (معادن عشوائية)
         double falseAlarmProb                = default(0.003);
 
+        // حد أقصى لعدد إشارات الإنذار الكاذب المعروضة على الشاشة
+        // القيمة -1 تعني بدون حد
+        int falseAlarmDisplayLimit           = default(50);
+
         // ── معاملات الشبكة ─────────────────────────────────
         int    destPort                      = default(5555);
         int    localPort                     = default(4000);

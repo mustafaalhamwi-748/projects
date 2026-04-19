@@ -36,6 +36,7 @@ void MineDetectionApp::initialize(int stage)
         magneticThreshold  = par("magneticThreshold");
         magneticSaturation = par("magneticSaturation");
         falseAlarmProb     = par("falseAlarmProb");
+        falseAlarmDisplayLimit = par("falseAlarmDisplayLimit");
         confirmRadius      = par("confirmRadius");
         destPort           = par("destPort");
         localPort          = par("localPort");
@@ -133,7 +134,7 @@ void MineDetectionApp::initSensorVisuals()
     sensorBarFg->setBounds(cFigure::Rectangle(cx-12, cy+14, 2, 4));
     sensorBarFg->setFilled(true);
     sensorBarFg->setFillColor(cFigure::Color(0, 100, 255));
-    sensorBarFg->setLineWidth(0);
+    sensorBarFg->setLineWidth(1);
     canvas->addFigure(sensorBarFg);
 }
 
@@ -244,11 +245,13 @@ void MineDetectionApp::performScan()
     SensorReading reading = sensor->measure(magVal);
 
     if (reading.isMine) {
+
+        // ── أولاً: هل يوجد لغم حقيقي قريب؟ ─────────────────
         int mineIdx = mineField->getNearestUndiscoveredMine(
             pos.x, pos.y, confirmRadius);
 
         if (mineIdx >= 0) {
-            // ✅ اكتشاف حقيقي
+            // ✅ اكتشاف حقيقي — لغم أرضي حقيقي
             mineField->markDiscovered(mineIdx);
             trueDetections++;
             emit(detectionSignal, 1L);
@@ -258,45 +261,56 @@ void MineDetectionApp::performScan()
                                 reading.magneticValue);
 
             EV_INFO << "UAV[" << uavId
-                    << "] ✅ MINE CONFIRMED at ("
+                    << "] MINE CONFIRMED at ("
                     << pos.x << "," << pos.y
                     << ") magVal=" << magVal
                     << " conf=" << reading.confidence << "\n";
+
         } else {
-            // تحقق: مكتشف مسبقاً أم إنذار كاذب؟
-            const auto& mines = mineField->getMines();
-            bool alreadyKnown = false;
-            for (const auto& m : mines) {
-                double d = sqrt(pow(pos.x-m.x,2)+pow(pos.y-m.y,2));
-                if (d < confirmRadius && m.discovered) {
-                    alreadyKnown = true;
-                    break;
-                }
-            }
-            if (alreadyKnown) {
-                duplicatesSkipped++;
-            } else {
+            // ── ثانياً: هل يوجد قطعة معدنية قريبة؟ ──────────
+            int debrisIdx = mineField->getNearestMetalDebris(
+                pos.x, pos.y, confirmRadius);
+
+            if (debrisIdx >= 0) {
+                // ⚠️ إنذار كاذب من قطعة معدنية
+                mineField->markDebrisTriggered(debrisIdx);
                 falseAlarms++;
                 emit(falseAlarmSignal, 1L);
-                addFalseAlarmFigure(pos.x, pos.y);
+
+                const auto& db = mineField->getDebris();
+                addFalseAlarmFigure(db[debrisIdx].x,
+                                    db[debrisIdx].y);
+
+                EV_INFO << "UAV[" << uavId
+                        << "] FALSE ALARM (metal debris) at ("
+                        << db[debrisIdx].x << ","
+                        << db[debrisIdx].y
+                        << ") magVal=" << magVal << "\n";
+            } else {
+                const auto& mines = mineField->getMines();
+                bool alreadyKnown = false;
+                for (const auto& m : mines) {
+                    double d = sqrt(pow(pos.x-m.x,2)
+                                  + pow(pos.y-m.y,2));
+                    if (d < confirmRadius && m.discovered) {
+                        alreadyKnown = true; break;
+                    }
+                }
+                if (alreadyKnown)
+                    duplicatesSkipped++;
             }
         }
     }
 
-    // ── ضوضاء مغناطيسية عشوائية ────────────────────────────
+    // ── ضوضاء عشوائية نادرة جداً ───────────────────────────
     if (uniform(0, 1) < falseAlarmProb) {
-        double noiseSpike = magneticThreshold
-            + uniform(0, magneticSaturation - magneticThreshold);
-        SensorReading nr = sensor->measure(noiseSpike);
-        if (nr.isMine) {
-            falseAlarms++;
-            emit(falseAlarmSignal, 1L);
-            double fpX = std::max(10.0,
-                std::min(990.0, pos.x + uniform(-20, 20)));
-            double fpY = std::max(10.0,
-                std::min(990.0, pos.y + uniform(-20, 20)));
-            addFalseAlarmFigure(fpX, fpY);
-        }
+        falseAlarms++;
+        emit(falseAlarmSignal, 1L);
+        double fpX = std::max(10.0,
+            std::min(990.0, pos.x + uniform(-15, 15)));
+        double fpY = std::max(10.0,
+            std::min(990.0, pos.y + uniform(-15, 15)));
+        addFalseAlarmFigure(fpX, fpY);
     }
 
     emit(coverageSignal, calculateCoverage());
@@ -393,6 +407,10 @@ double MineDetectionApp::calculateCoverage()
 // ============================================================
 void MineDetectionApp::addFalseAlarmFigure(double x, double y)
 {
+    if (falseAlarmDisplayLimit >= 0 &&
+        falseAlarmFigureCount >= falseAlarmDisplayLimit)
+        return;
+
     cCanvas    *canvas = getSystemModule()->getCanvas();
     std::string name   = "fa_" + std::to_string(uavId)
                        + "_" + std::to_string(falseAlarmFigureCount++);
@@ -458,13 +476,16 @@ void MineDetectionApp::finish()
     EV_INFO << "Messages Sent     : " << messagesSent       << "\n";
 
     if (uavId == 0) {
-        int total = mineField->getNumMines();
-        int found = mineField->getDiscoveredCount();
+        int total   = mineField->getNumMines();
+        int found   = mineField->getDiscoveredCount();
+        int nDebris = mineField->getNumDebris();
         EV_INFO << "\n=== Network Summary ===\n";
-        EV_INFO << "Total Mines   : " << total << "\n";
-        EV_INFO << "Found Mines   : " << found << "\n";
-        EV_INFO << "Detection Rate: "
+        EV_INFO << "Total Mines     : " << total   << "\n";
+        EV_INFO << "Mines Found     : " << found   << "\n";
+        EV_INFO << "Detection Rate  : "
                 << (double)found/total*100.0 << "%\n";
+        EV_INFO << "Metal Debris    : " << nDebris
+                << " pieces (false alarm sources)\n";
     }
 
     recordScalar("trueDetections",    trueDetections);
