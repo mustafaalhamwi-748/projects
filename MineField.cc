@@ -192,6 +192,7 @@ int MineField::getNearestMetalDebris(double x, double y,
     double bestDist = radius;
 
     for (int i = 0; i < (int)debris.size(); i++) {
+        if (debris[i].triggered) continue;   // تجاهل ما سبق إطلاقه
         double d = sqrt(pow(x - debris[i].x, 2) +
                         pow(y - debris[i].y, 2));
         if (d < bestDist) {
@@ -228,45 +229,7 @@ int MineField::getDiscoveredCount() const
 // ============================================================
 void MineField::drawFarmBackground()
 {
-    cCanvas *canvas = getSystemModule()->getCanvas();
-
-    // ── خلفية التربة البنية ────────────────────────────────
-    auto *bg = new cRectangleFigure("farmBg");
-    bg->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
-    bg->setFilled(true);
-    bg->setFillColor(cFigure::Color(180, 140, 90));  // بني فاتح
-    bg->setLineWidth(0);
-    canvas->addFigure(bg);
-
-    // ── خطوط الحراثة الأفقية ──────────────────────────────
-    // كل 50 متر خط حراثة أغمق قليلاً
-    for (int y = 0; y <= 1000; y += 50) {
-        auto *line = new cLineFigure(
-            ("furrow_" + std::to_string(y)).c_str());
-        line->setStart(cFigure::Point(0, y));
-        line->setEnd(cFigure::Point(1000, y));
-        line->setLineColor(cFigure::Color(155, 118, 70));
-        line->setLineWidth(1);
-        line->setLineOpacity(0.5);
-        canvas->addFigure(line);
-    }
-
-    // ── حدود المنطقة ──────────────────────────────────────
-    auto *border = new cRectangleFigure("border");
-    border->setBounds(cFigure::Rectangle(0, 0, 1000, 1000));
-    border->setFilled(false);
-    border->setLineColor(cFigure::Color(100, 70, 30));
-    border->setLineWidth(3);
-    canvas->addFigure(border);
-
-    // ── تسمية المنطقة ──────────────────────────────────────
-    auto *areaLbl = new cTextFigure("areaLabel");
-    areaLbl->setPosition(cFigure::Point(500, 15));
-    areaLbl->setText("Agricultural Field — 1km x 1km | MAD Mine Detection");
-    areaLbl->setColor(cFigure::Color(60, 40, 10));
-    areaLbl->setAnchor(cFigure::ANCHOR_N);
-    areaLbl->setFont(cFigure::Font("", 9, cFigure::FONT_BOLD));
-    canvas->addFigure(areaLbl);
+    // لا حاجة لرسم خلفية — نستخدم خلفية المحاكي الافتراضية
 }
 
 // ============================================================
@@ -385,69 +348,74 @@ void MineField::addLegend()
     cCanvas *canvas = getSystemModule()->getCanvas();
     auto    *lg     = new cGroupFigure("legend");
 
+    // ── وسيلة الإيضاح خارج منطقة الـ 1كم، على اليمين ──────
+    // تبدأ من x=1020 بجانب حدود المنطقة
+    const double LX  = 1310;  // يسار مربع الشرح — نفس x الوحدات
+    const double LY  = 650;   // أسفل آخر وحدة (mineField عند y=560)
+    const double LW  = 260;   // عرض المربع
+    const double LH  = 120;   // ارتفاع المربع
+    const double ROW = 24;    // المسافة العمودية بين الصفوف
+
     // الخلفية
     auto *bg = new cRectangleFigure("bg");
-    bg->setBounds(cFigure::Rectangle(5, 1008, 310, 115));
+    bg->setBounds(cFigure::Rectangle(LX, LY, LW, LH));
     bg->setFilled(true);
-    bg->setFillColor(cFigure::Color(245, 240, 225));
-    bg->setFillOpacity(0.92);
-    bg->setLineColor(cFigure::Color(100, 80, 40));
-    bg->setLineWidth(2);
+    bg->setFillColor(cFigure::Color(245, 245, 245));
+    bg->setFillOpacity(0.95);
+    bg->setLineColor(cFigure::Color(80, 80, 80));
+    bg->setLineWidth(1);
     lg->addFigure(bg);
 
     // العنوان
     auto *ttl = new cTextFigure("ttl");
-    ttl->setPosition(cFigure::Point(160, 1020));
-    ttl->setText("MAD System Legend — Agricultural Field");
-    ttl->setColor(cFigure::Color(60, 40, 10));
+    ttl->setPosition(cFigure::Point(LX + LW/2, LY + 12));
+    ttl->setText("MAD System Legend");
+    ttl->setColor(cFigure::Color(30, 30, 30));
     ttl->setAnchor(cFigure::ANCHOR_CENTER);
-    ttl->setFont(cFigure::Font("", 8, cFigure::FONT_BOLD));
+    ttl->setFont(cFigure::Font("", 9, cFigure::FONT_BOLD));
     lg->addFigure(ttl);
 
-    // الصفوف
+    // الصفوف: {لون R,G,B | شكل | نص}
     struct {
-        int    y1, y2;
-        bool   isRect;
-        uint8_t fr,fg,fb;
+        uint8_t fr, fg, fb;
+        bool    isRect;
         const char *txt;
     } rows[] = {
-        {1028, 1035, false, 220,  0,  0,
-            "Real Mine (undiscovered)"},
-        {1046, 1053, false,   0,210,  0,
-            "Real Mine (discovered by MAD)"},
-        {1064, 1071, false, 255,220,  0,
-            "False Alarm (metal debris detected)"},
-        {1082, 1089, true,  160,160,160,
-            "Metal Debris (nails/wires/cans/tools)"}
+        {220,  0,   0,  false, "Real Mine (undiscovered)"},
+        {  0, 210,  0,  false, "Real Mine (discovered by MAD)"},
+        {255, 220,  0,  false, "False Alarm (debris detected)"},
+        {160, 160, 160, true,  "Metal Debris (nails/wires/cans)"}
     };
 
     for (int r = 0; r < 4; r++) {
+        double iy = LY + 30 + r * ROW;   // y أعلى الأيقونة
+        double ty = iy + 9;               // y مركز النص
+
         if (rows[r].isRect) {
             auto *sq = new cRectangleFigure(
                 ("ld" + std::to_string(r)).c_str());
-            sq->setBounds(cFigure::Rectangle(12, rows[r].y1, 12, 12));
+            sq->setBounds(cFigure::Rectangle(LX + 8, iy, 14, 14));
             sq->setFilled(true);
-            sq->setFillColor(
-                cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
-            sq->setLineColor(cFigure::Color(80, 80, 80));
+            sq->setFillColor(cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
+            sq->setLineColor(cFigure::Color(60, 60, 60));
+            sq->setLineWidth(1);
             lg->addFigure(sq);
         } else {
             auto *dot = new cOvalFigure(
                 ("ld" + std::to_string(r)).c_str());
-            dot->setBounds(
-                cFigure::Rectangle(12, rows[r].y1, 12, 12));
+            dot->setBounds(cFigure::Rectangle(LX + 8, iy, 14, 14));
             dot->setFilled(true);
-            dot->setFillColor(
-                cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
-            dot->setLineColor(cFigure::Color(80, 80, 80));
+            dot->setFillColor(cFigure::Color(rows[r].fr, rows[r].fg, rows[r].fb));
+            dot->setLineColor(cFigure::Color(60, 60, 60));
+            dot->setLineWidth(1);
             lg->addFigure(dot);
         }
 
         auto *txt = new cTextFigure(
             ("lt" + std::to_string(r)).c_str());
-        txt->setPosition(cFigure::Point(30, rows[r].y2));
+        txt->setPosition(cFigure::Point(LX + 28, ty));
         txt->setText(rows[r].txt);
-        txt->setColor(cFigure::Color(40, 30, 10));
+        txt->setColor(cFigure::Color(30, 30, 30));
         txt->setAnchor(cFigure::ANCHOR_W);
         txt->setFont(cFigure::Font("", 8, 0));
         lg->addFigure(txt);

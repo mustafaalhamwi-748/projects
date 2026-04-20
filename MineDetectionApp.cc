@@ -313,7 +313,10 @@ void MineDetectionApp::performScan()
         addFalseAlarmFigure(fpX, fpY);
     }
 
-    emit(coverageSignal, calculateCoverage());
+    // ── تغطية المنطقة (كل 10s فقط لتوفير الأداء) ─────────────
+    if (fmod(simTime().dbl(), 10.0) < scanInterval)
+        emit(coverageSignal, calculateCoverage());
+
     scheduleAt(simTime() + scanInterval, scanTimer);
 }
 
