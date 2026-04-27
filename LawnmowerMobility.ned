@@ -15,5 +15,7 @@ simple LawnmowerMobility extends MovingMobilityBase
         double y2 @unit(m);
         int rowCount;
         double altitude @unit(m) = default(80m);
+        bool reverse = default(false);
+        double startDelay @unit(s) = default(0s);
         @class(uavminedetection::LawnmowerMobility);
 }
