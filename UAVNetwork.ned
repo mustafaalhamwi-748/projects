@@ -2,7 +2,7 @@ package uavminedetection;
 
 import inet.networklayer.configurator.ipv4.Ipv4NetworkConfigurator;
 import inet.physicallayer.ieee80211.packetlevel.Ieee80211ScalarRadioMedium;
-import inet.visualizer.integrated.IntegratedCanvasVisualizer;
+import inet.visualizer.integrated.IntegratedOsgVisualizer;
 import inet.node.inet.AdhocHost;
 
 // ============================================================
@@ -24,7 +24,7 @@ network UAVMineDetection
 
     submodules:
         // ── وحدات البنية التحتية ───────────────────────────
-        visualizer: IntegratedCanvasVisualizer {
+        visualizer: IntegratedOsgVisualizer {
             @display("p=1100,50");
         }
         radioMedium: Ieee80211ScalarRadioMedium {

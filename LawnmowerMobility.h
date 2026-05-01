@@ -15,10 +15,7 @@ class LawnmowerMobility : public inet::LineSegmentsMobilityBase
     double y2 = 0;
     int rowCount = 0;
     double altitude = 0;
-    bool reverse = false;
-    double startDelay = 0;
     int step = 0;
-    bool started = false;
 
   protected:
     virtual void initialize(int stage) override;

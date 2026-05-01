@@ -4,6 +4,17 @@
 #include <vector>
 #include <omnetpp.h>
 
+#ifdef WITH_OSG
+#include <omnetpp/cosgcanvas.h>
+#include <osg/Group>
+#include <osg/Geode>
+#include <osg/ShapeDrawable>
+#include <osg/Shape>
+#include <osg/Material>
+#include <osg/StateSet>
+#include <osg/MatrixTransform>
+#endif
+
 using namespace omnetpp;
 
 namespace uavminedetection {
@@ -33,42 +44,26 @@ enum MetalType {
 struct MetalDebris {
     double   x, y;
     MetalType type;
-    double   magneticStrength; // قوة مغناطيسية أقل من اللغم
-    bool     triggered;        // هل أطلقت إنذاراً من قبل؟
+    double   magneticStrength;
+    bool     triggered;
 };
 
 // ============================================================
 // MineField — حقل الألغام + القطع المعدنية العشوائية
-//
-// الطائرات لا تعرف مسبقاً:
-//   - مواضع الألغام الحقيقية
-//   - مواضع القطع المعدنية
-// تكتشف فقط بالقياس المغناطيسي
 // ============================================================
 class MineField : public cSimpleModule
 {
   public:
-    // ── واجهة الطائرات ──────────────────────────
     double getMagneticValue(double uavX, double uavY) const;
-
-    // يُعيد index أقرب لغم حقيقي غير مكتشف ضمن radius
-    int    getNearestUndiscoveredMine(double x, double y,
-                                      double radius) const;
-
-    // يُعيد index أقرب قطعة معدنية ضمن radius
-    // يُعيد -1 إذا لا يوجد
-    int    getNearestMetalDebris(double x, double y,
-                                 double radius) const;
-
-    // تسجيل اكتشافات
+    int    getNearestUndiscoveredMine(double x, double y, double radius) const;
+    int    getNearestMetalDebris(double x, double y, double radius) const;
     void   markDiscovered(int index);
     void   markDebrisTriggered(int index);
 
-    // ── استعلامات ──────────────────────────────
     int    getNumMines()        const { return (int)mines.size(); }
     int    getDiscoveredCount() const;
     int    getNumDebris()       const { return (int)debris.size(); }
-    const  std::vector<MinePos>&    getMines()  const { return mines; }
+    const  std::vector<MinePos>&     getMines()  const { return mines; }
     const  std::vector<MetalDebris>& getDebris() const { return debris; }
 
   protected:
@@ -84,7 +79,7 @@ class MineField : public cSimpleModule
     double backgroundNoise;
     double noiseVariation;
 
-    // رسومات Canvas
+    // رسومات Canvas 2D
     std::vector<cGroupFigure*>  mineFigures;
     std::vector<cGroupFigure*>  debrisFigures;
 
@@ -92,6 +87,21 @@ class MineField : public cSimpleModule
     void createDebrisVisuals();
     void drawFarmBackground();
     void addLegend();
+
+#ifdef WITH_OSG
+    // رسومات OSG 3D
+    std::vector<osg::ref_ptr<osg::MatrixTransform>> mineOsgNodes;
+    std::vector<osg::ref_ptr<osg::MatrixTransform>> debrisOsgNodes;
+
+    void createMineOsgVisuals();
+    void createDebrisOsgVisuals();
+    osg::ref_ptr<osg::MatrixTransform> makeSphere(double x, double y, double z,
+                                                   double radius,
+                                                   float r, float g, float b);
+    osg::ref_ptr<osg::MatrixTransform> makeBox(double x, double y, double z,
+                                               double size,
+                                               float r, float g, float b);
+#endif
 };
 
 } // namespace uavminedetection

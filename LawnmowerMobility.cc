@@ -21,22 +21,12 @@ void LawnmowerMobility::initialize(int stage)
         y2 = par("y2");
         rowCount = par("rowCount");
         altitude = par("altitude");
-        reverse = par("reverse");
-        startDelay = par("startDelay");
         step = 0;
-        started = false;
 
         if (speed <= 0)
             throw omnetpp::cRuntimeError("LawnmowerMobility: speed must be > 0");
         if (rowCount <= 0)
             throw omnetpp::cRuntimeError("LawnmowerMobility: rowCount must be > 0");
-        if (startDelay < 0)
-            throw omnetpp::cRuntimeError("LawnmowerMobility: startDelay must be >= 0");
-
-        if (reverse) {
-            std::swap(x1, x2);
-            std::swap(y1, y2);
-        }
     }
 }
 
@@ -47,15 +37,6 @@ void LawnmowerMobility::setInitialPosition()
 
 void LawnmowerMobility::setTargetPosition()
 {
-    if (!started && omnetpp::simTime() < startDelay) {
-        targetPosition = lastPosition;
-        nextChange = startDelay;
-        return;
-    }
-
-    if (!started)
-        started = true;
-
     int sign;
     inet::Coord positionDelta = inet::Coord::ZERO;
 
