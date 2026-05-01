@@ -6,6 +6,7 @@
 #include "inet/applications/base/ApplicationBase.h"
 #include "inet/transportlayer/contract/udp/UdpSocket.h"
 #include "inet/mobility/contract/IMobility.h"
+#include "inet/common/geometry/common/Coord.h"
 #include "MagnetometerSensor.h"
 #include "MineField.h"
 
@@ -36,6 +37,9 @@ class MineDetectionApp : public ApplicationBase,
     UdpSocket  socket;
     cMessage  *scanTimer = nullptr;
     IMobility *mobility  = nullptr;
+
+    // ── الذاكرة المشتركة للمواقع المكتشفة ──────
+    std::vector<inet::Coord> sharedMemory;
 
     // ── آخر قيمة مقاسة (للتصور المرئي) ────────
     double lastMagneticValue = 0.0;
