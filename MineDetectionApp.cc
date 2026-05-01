@@ -234,6 +234,15 @@ void MineDetectionApp::performScan()
 {
     Coord pos = mobility->getCurrentPosition();
 
+    // ── فحص الذاكرة المشتركة أولاً ─────────────────────────
+    for (const auto& knownPos : sharedMemory) {
+        if (pos.distance(knownPos) < confirmRadius) {
+            duplicatesSkipped++;
+            scheduleAt(simTime() + scanInterval, scanTimer);
+            return;
+        }
+    }
+
     // ── قياس المجال المغناطيسي ──────────────────────────────
     double magVal = mineField->getMagneticValue(pos.x, pos.y);
     lastMagneticValue = magVal;
@@ -255,6 +264,8 @@ void MineDetectionApp::performScan()
             mineField->markDiscovered(mineIdx);
             trueDetections++;
             emit(detectionSignal, 1L);
+
+            sharedMemory.push_back(pos);
 
             sendDetectionReport(pos.x, pos.y,
                                 reading.confidence,
@@ -360,18 +371,11 @@ void MineDetectionApp::sendDetectionReport(double x, double y,
 
     auto *pkt = new Packet("MineDetectionReport", payload);
 
-    L3Address dest;
-    L3AddressResolver().tryResolve("gcs", dest);
+    L3Address dest("255.255.255.255");
 
-    if (!dest.isUnspecified()) {
-        socket.sendTo(pkt, dest, destPort);
-        messagesSent++;
-        EV_INFO << "Sent to GCS: " << buf << "\n";
-    } else {
-        EV_WARN << "UAV[" << uavId
-                << "] Cannot resolve GCS address!\n";
-        delete pkt;
-    }
+    socket.sendTo(pkt, dest, destPort);
+    messagesSent++;
+    EV_INFO << "Broadcasted: " << buf << "\n";
 }
 
 // ============================================================
@@ -456,6 +460,48 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
 {
     EV_INFO << "UAV[" << uavId
             << "] received: " << pkt->getName() << "\n";
+
+    auto payload = pkt->peekData<BytesChunk>();
+    const auto& bytes = payload->getBytes();
+    std::string msgText(reinterpret_cast<const char*>(bytes.data()),
+                        bytes.size());
+
+    // رسالة المصدر: "MINE:uav=1,x=150.5,y=200.2,conf=...,magVal=...,t=..."
+    size_t uavPos  = msgText.find("uav=");
+    size_t xPos    = msgText.find(",x=");
+    size_t yPos    = msgText.find(",y=");
+    size_t confPos = msgText.find(",conf");
+
+    if (uavPos  != std::string::npos &&
+        xPos    != std::string::npos &&
+        yPos    != std::string::npos &&
+        confPos != std::string::npos)
+    {
+        try {
+            int senderUav = std::stoi(
+                msgText.substr(uavPos + 4, xPos - uavPos - 4));
+            double parsedX = std::stod(
+                msgText.substr(xPos + 3, yPos - xPos - 3));
+            double parsedY = std::stod(
+                msgText.substr(yPos + 3, confPos - yPos - 3));
+
+            // تجاهل رسائلنا الخاصة (تمت إضافة الموقع محلياً عند الاكتشاف)
+            if (senderUav != uavId) {
+                sharedMemory.push_back(Coord(parsedX, parsedY, 0));
+                EV_INFO << "UAV[" << uavId
+                        << "] added remote mine at ("
+                        << parsedX << "," << parsedY
+                        << ") to sharedMemory\n";
+            }
+        } catch (const std::invalid_argument&) {
+            EV_WARN << "UAV[" << uavId
+                    << "] invalid number format in mine report\n";
+        } catch (const std::out_of_range&) {
+            EV_WARN << "UAV[" << uavId
+                    << "] coordinate value out of range in mine report\n";
+        }
+    }
+
     delete pkt;
 }
 
