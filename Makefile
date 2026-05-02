@@ -2,7 +2,7 @@
 # OMNeT++/OMNEST Makefile for UAVMineDetection
 #
 # This file was generated with the command:
-#  opp_makemake -f --deep -KINET_PROJ=../../inet -DINET_IMPORT -I$$\(INET_PROJ\)/src -L$$\(INET_PROJ\)/src -lINET$$\(D\)
+#  opp_makemake -f --deep -KINET_PROJ=../../inet -DINET_IMPORT -I$$\(INET_PROJ\)/src -L$$\(INET_PROJ\)/src -lOpenThreads -losg -losgGA -losgViewer -losgUtil -lINET$$\(D\)
 #
 
 # Name of target to be created (-o option)
@@ -22,7 +22,7 @@ INCLUDE_PATH = -I$(INET_PROJ)/src
 EXTRA_OBJS =
 
 # Additional libraries (-L, -l options)
-LIBS = $(LDFLAG_LIBPATH)$(INET_PROJ)/src  -lINET$(D)
+LIBS = $(LDFLAG_LIBPATH)$(INET_PROJ)/src  -lOpenThreads -losg -losgGA -losgViewer -losgUtil -lINET$(D)
 
 # Output directory
 PROJECT_OUTPUT_DIR = ../out
@@ -30,7 +30,7 @@ PROJECTRELATIVE_PATH = src
 O = $(PROJECT_OUTPUT_DIR)/$(CONFIGNAME)/$(PROJECTRELATIVE_PATH)
 
 # Object files for local .cc, .msg and .sm files
-OBJS = $O/LawnmowerMobility.o $O/MagnetometerSensor.o $O/MineDetectionApp.o $O/MineField.o
+OBJS = $O/GcsApp.o $O/LawnmowerMobility.o $O/MagnetometerSensor.o $O/MineDetectionApp.o $O/MineField.o
 
 # Message files
 MSGFILES =

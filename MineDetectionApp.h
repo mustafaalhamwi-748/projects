@@ -1,107 +1,111 @@
 #ifndef __UAVMINEDETECTION_MINEDETECTIONAPP_H
 #define __UAVMINEDETECTION_MINEDETECTIONAPP_H
 
-#include <vector>
-#include <string>
 #include "inet/applications/base/ApplicationBase.h"
 #include "inet/transportlayer/contract/udp/UdpSocket.h"
 #include "inet/mobility/contract/IMobility.h"
 #include "inet/common/geometry/common/Coord.h"
-#include "MagnetometerSensor.h"
-#include "MineField.h"
+#include "inet/environment/contract/IPhysicalEnvironment.h"
+#include "inet/common/packet/Packet.h"
 
+// استدعاء مكتبة الرسوميات الشاملة من omnetpp
+#include <omnetpp.h>
+
+#include "MineField.h"
+#include "MagnetometerSensor.h"
+
+using namespace omnetpp;
 using namespace inet;
 
 namespace uavminedetection {
 
-class MineDetectionApp : public ApplicationBase,
-                         public UdpSocket::ICallback
+struct CandidateMine {
+    inet::Coord pos;
+    simtime_t firstDetectedTime;
+    int firstDetectorId;
+    double confidence;
+    double magVal;
+};
+
+class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 {
   protected:
-    // ── معاملات التطبيق ────────────────────────
-    int    uavId;
-    double scanInterval;
-    double magneticThreshold;
-    double magneticSaturation;
-    double falseAlarmProb;
-    int    falseAlarmDisplayLimit;
-    double confirmRadius;
-    int    destPort;
-    int    localPort;
+    int uavId = -1;
+    double scanInterval = 0.5;
+    double magneticThreshold = 0;
+    double magneticSaturation = 0;
+    double falseAlarmProb = 0;
+    int falseAlarmDisplayLimit = 30;
+    double confirmRadius = 25.0;
 
-    // ── الحساس والمرجع لحقل الألغام ───────────
-    MagnetometerSensor *sensor    = nullptr;
-    MineField          *mineField = nullptr;
+    int destPort = -1;
+    int localPort = -1;
+    UdpSocket socket;
 
-    // ── حالة التطبيق ───────────────────────────
-    UdpSocket  socket;
-    cMessage  *scanTimer = nullptr;
-    IMobility *mobility  = nullptr;
+    MineField *mineField = nullptr;
+    MagnetometerSensor *sensor = nullptr;
+    IMobility *mobility = nullptr;
 
-    // ── الذاكرة المشتركة للمواقع المكتشفة ──────
+    cMessage *scanTimer = nullptr;
+    cMessage *intensiveTimer = nullptr; // مؤقت حالة التأهب الجديد
+
+    // حالة الطائرة
+    bool isIntensiveMode = false; // هل الطائرة في حالة بحث مكثف؟
+
     std::vector<inet::Coord> sharedMemory;
+    std::vector<CandidateMine> candidateMines;
 
-    // ── آخر قيمة مقاسة (للتصور المرئي) ────────
+    // الإحصاءات
+    int trueDetections = 0;
+    int falseAlarms = 0;
+    int duplicatesSkipped = 0;
+    int messagesSent = 0;
     double lastMagneticValue = 0.0;
-
-    // ── figures التصور المرئي للتردد المغناطيسي ─
-    // دائرة خارجية: تمثل نطاق الحساس، لونها يعكس القيمة
-    cOvalFigure *sensorRingFigure  = nullptr;
-    // رقم قيمة المجال (nT)
-    cTextFigure *sensorValueFigure = nullptr;
-    // شريط تقدم بصري للقيمة
-    cRectangleFigure *sensorBarBg  = nullptr;  // خلفية الشريط
-    cRectangleFigure *sensorBarFg  = nullptr;  // ملء الشريط
-
-    // ── figures الإنذارات الكاذبة ──────────────
     int falseAlarmFigureCount = 0;
 
-    // ── إحصاءات ────────────────────────────────
-    int trueDetections    = 0;
-    int falseAlarms       = 0;
-    int duplicatesSkipped = 0;
-    int messagesSent      = 0;
+    double confirmationTimeout = 30.0;
 
-    // ── Signals ─────────────────────────────────
+    // العناصر البصرية
+    cOvalFigure *sensorRingFigure = nullptr;
+    cTextFigure *sensorValueFigure = nullptr;
+    cRectangleFigure *sensorBarBg = nullptr;
+    cRectangleFigure *sensorBarFg = nullptr;
+
+    // الإشارات (Signals)
     static simsignal_t detectionSignal;
     static simsignal_t coverageSignal;
     static simsignal_t falseAlarmSignal;
 
   protected:
-    virtual int  numInitStages() const override { return NUM_INIT_STAGES; }
-    virtual void initialize(int stage)          override;
+    virtual int numInitStages() const override { return NUM_INIT_STAGES; }
+    virtual void initialize(int stage) override;
+    virtual void finish() override;
     virtual void handleMessageWhenUp(cMessage *msg) override;
-    virtual void finish()                       override;
-    virtual void refreshDisplay() const         override;
+    virtual void refreshDisplay() const override;
 
-    // ── دورة المسح ─────────────────────────────
+    virtual void handleStartOperation(LifecycleOperation *op) override;
+    virtual void handleStopOperation(LifecycleOperation *op) override;
+    virtual void handleCrashOperation(LifecycleOperation *op) override;
+
+    virtual void socketDataArrived(UdpSocket *socket, Packet *packet) override;
+    virtual void socketErrorArrived(UdpSocket *socket, Indication *indication) override;
+    virtual void socketClosed(UdpSocket *socket) override {}
+
     void performScan();
-    void sendDetectionReport(double x, double y,
-                             double confidence,
-                             double magneticValue);
+    void sendNetworkMessage(const char* type, double x, double y, double confidence, double magneticValue);
     double calculateCoverage();
 
-    // ── التصور المرئي للتردد المغناطيسي ────────
-    void   initSensorVisuals();
-    void   updateSensorVisuals(double magVal,
-                               double uavX, double uavY) const;
+    void initSensorVisuals();
+    void updateSensorVisuals(double magVal, double uavX, double uavY) const;
     cFigure::Color getMagneticColor(double magVal) const;
-    double         getMagneticRadius(double magVal) const;
-
-    // ── مساعدات Canvas ─────────────────────────
+    double getMagneticRadius(double magVal) const;
     void addFalseAlarmFigure(double x, double y);
 
-    // ── UdpSocket callbacks ─────────────────────
-    virtual void socketDataArrived(UdpSocket *socket,
-                                   Packet *packet)         override;
-    virtual void socketErrorArrived(UdpSocket *socket,
-                                    Indication *indication) override;
-    virtual void socketClosed(UdpSocket *socket)           override {}
+    void checkTimeouts();
+    void confirmTarget(inet::Coord targetPos, double confidence, double magVal);
 
-    // ── دورة حياة التطبيق ──────────────────────
-    virtual void handleStartOperation(LifecycleOperation *op) override;
-    virtual void handleStopOperation(LifecycleOperation *op)  override;
-    virtual void handleCrashOperation(LifecycleOperation *op) override;
+    // دالة جديدة لمعالجة أمر المحطة الأرضية
+    void startIntensiveSearch(double cmdX, double cmdY);
 };
 
 } // namespace uavminedetection
