@@ -18,8 +18,9 @@ class GcsApp : public ApplicationBase, public UdpSocket::ICallback
     int destPort;
     UdpSocket socket;
 
-    std::vector<inet::Coord> globalMineMap;
-    int totalFalseAlarms = 0; // تم إضافة هذا المتغير لحساب الإنذارات الكاذبة
+    // [تم التصحيح: خريطتان منفصلتان بدلاً من خريطة واحدة]
+    std::vector<inet::Coord> realMineMap;      // الألغام الحقيقية فقط
+    std::vector<inet::Coord> falseAlarmMap;    // الإنذارات الكاذبة فقط
 
   protected:
     virtual int numInitStages() const override { return NUM_INIT_STAGES; }
@@ -37,6 +38,9 @@ class GcsApp : public ApplicationBase, public UdpSocket::ICallback
     virtual void handleCrashOperation(LifecycleOperation *op) override { socket.destroy(); }
 
     void sendCommandToSwarm(double x, double y);
+
+    // مساعد: هل الموقع موجود مسبقاً في الخريطة المعطاة؟
+    bool isDuplicate(const std::vector<inet::Coord>& map, const inet::Coord& pos, double threshold = 50.0) const;
 };
 
 } // namespace uavminedetection

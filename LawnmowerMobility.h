@@ -9,7 +9,7 @@ class LawnmowerMobility : public inet::LineSegmentsMobilityBase
 {
   protected:
     double speed = 0;
-    double originalSpeed = 0; // لحفظ السرعة الأصلية
+    double originalSpeed = 0;
     double x1 = 0;
     double y1 = 0;
     double x2 = 0;
@@ -23,8 +23,12 @@ class LawnmowerMobility : public inet::LineSegmentsMobilityBase
     inet::Coord spiralCenter;
     double currentAngle = 0;
     double currentRadius = 0;
-    inet::Coord savedPosition; // لحفظ موقع الطائرة قبل الحلزون
+    inet::Coord savedPosition;
     int savedStep = 0;
+
+    // ── [NEW] متغيرات العودة إلى القاعدة ──
+    bool isHomeMode = false;       // هل الطائرة في وضع RTH؟
+    inet::Coord homeTarget;        // موضع GCS (500, 950, 80)
 
   protected:
     virtual void initialize(int stage) override;
@@ -32,9 +36,14 @@ class LawnmowerMobility : public inet::LineSegmentsMobilityBase
     virtual void setTargetPosition() override;
 
   public:
-    // دوال للتحكم من الخارج
     void startSpiral(double centerX, double centerY);
     void stopSpiral();
+
+    // [NEW]: تغيير الارتفاع فورياً بتحديث المتغير الداخلي مباشرة
+    void setAltitude(double newAlt);
+
+    // [NEW]: التوجه المباشر نحو نقطة القاعدة
+    void goHome(double homeX, double homeY, double homeAltitude);
 };
 
 } // namespace uavminedetection

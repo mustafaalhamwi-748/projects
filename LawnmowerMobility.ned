@@ -4,6 +4,12 @@ import inet.mobility.base.MovingMobilityBase;
 
 //
 // LawnmowerMobility — حركة تغطية بخطوط متوازية (Lawnmower)
+// تدعم وضعين: Lawnmower عادي + Spiral مكثف عند أمر GCS
+//
+// ملاحظة:
+//   NED  يرث من MovingMobilityBase      ← للحصول على معاملات constraintArea وغيرها
+//   C++  يرث من LineSegmentsMobilityBase ← للحصول على setTargetPosition()
+//   التوارث في NED والـ C++ مستقلان تماماً في INET — لا تعارض
 //
 simple LawnmowerMobility extends MovingMobilityBase
 {

@@ -7,8 +7,9 @@
 #include "inet/common/geometry/common/Coord.h"
 #include "inet/environment/contract/IPhysicalEnvironment.h"
 #include "inet/common/packet/Packet.h"
+#include "inet/networklayer/common/L3Address.h"
+#include "inet/networklayer/common/L3AddressResolver.h"
 
-// استدعاء مكتبة الرسوميات الشاملة من omnetpp
 #include <omnetpp.h>
 
 #include "MineField.h"
@@ -42,15 +43,28 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     int localPort = -1;
     UdpSocket socket;
 
+    inet::L3Address gcsAddress;
+
     MineField *mineField = nullptr;
     MagnetometerSensor *sensor = nullptr;
     IMobility *mobility = nullptr;
 
-    cMessage *scanTimer = nullptr;
-    cMessage *intensiveTimer = nullptr; // مؤقت حالة التأهب الجديد
+    cMessage *scanTimer      = nullptr;
+    cMessage *intensiveTimer = nullptr;
+
+    // ── [NEW] مؤقت العودة إلى القاعدة ──────────────────────
+    cMessage *returnHomeTimer = nullptr;
 
     // حالة الطائرة
-    bool isIntensiveMode = false; // هل الطائرة في حالة بحث مكثف؟
+    bool isIntensiveMode = false;
+
+    // ── [NEW] متغيرات العودة إلى القاعدة ───────────────────
+    bool isReturningHome = false;   // هل الطائرة في وضع العودة؟
+    static constexpr double RETURN_HOME_BEFORE = 50.0;  // ثانية قبل النهاية
+    static constexpr double GCS_X = 500.0;              // إحداثي X لـ GCS
+    static constexpr double GCS_Y = 950.0;              // إحداثي Y لـ GCS
+    static constexpr double CRUISE_ALTITUDE  = 80.0;    // ارتفاع المسح الطبيعي
+    static constexpr double SCAN_ALTITUDE    = 30.0;    // ارتفاع المسح المكثف
 
     std::vector<inet::Coord> sharedMemory;
     std::vector<CandidateMine> candidateMines;
@@ -66,10 +80,10 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     double confirmationTimeout = 30.0;
 
     // العناصر البصرية
-    cOvalFigure *sensorRingFigure = nullptr;
-    cTextFigure *sensorValueFigure = nullptr;
-    cRectangleFigure *sensorBarBg = nullptr;
-    cRectangleFigure *sensorBarFg = nullptr;
+    cOvalFigure     *sensorRingFigure  = nullptr;
+    cTextFigure     *sensorValueFigure = nullptr;
+    cRectangleFigure *sensorBarBg     = nullptr;
+    cRectangleFigure *sensorBarFg     = nullptr;
 
     // الإشارات (Signals)
     static simsignal_t detectionSignal;
@@ -92,7 +106,8 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     virtual void socketClosed(UdpSocket *socket) override {}
 
     void performScan();
-    void sendNetworkMessage(const char* type, double x, double y, double confidence, double magneticValue);
+    void sendNetworkMessage(const char* type, double x, double y,
+                            double confidence, double magneticValue);
     double calculateCoverage();
 
     void initSensorVisuals();
@@ -103,9 +118,11 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     void checkTimeouts();
     void confirmTarget(inet::Coord targetPos, double confidence, double magVal);
-
-    // دالة جديدة لمعالجة أمر المحطة الأرضية
     void startIntensiveSearch(double cmdX, double cmdY);
+
+    // ── [NEW] دوال العودة إلى القاعدة وتغيير الارتفاع ──────
+    void initiateReturnHome();
+    void setFlightAltitude(double altitudeMeters);
 };
 
 } // namespace uavminedetection

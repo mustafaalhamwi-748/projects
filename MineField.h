@@ -13,34 +13,27 @@
 #include <osg/Material>
 #include <osg/StateSet>
 #include <osg/MatrixTransform>
+#include <osg/Geometry>
+#include <osg/Array>
+#include <osg/PrimitiveSet>
 #endif
 
 using namespace omnetpp;
 
 namespace uavminedetection {
 
-// ============================================================
-// بنية اللغم الحقيقي
-// ============================================================
 struct MinePos {
     double x, y;
     bool   discovered;
 };
 
-// ============================================================
-// نوع القطعة المعدنية العشوائية
-// ============================================================
 enum MetalType {
-    NAIL,       // مسمار صغير
-    WIRE,       // سلك
-    CAN,        // علبة معدنية
-    TOOL_PART   // بقايا معدات زراعية
+    NAIL,
+    WIRE,
+    CAN,
+    TOOL_PART
 };
 
-// ============================================================
-// بنية القطعة المعدنية العشوائية (50 قطعة)
-// تُسبب إنذارات كاذبة عند الاكتشاف
-// ============================================================
 struct MetalDebris {
     double   x, y;
     MetalType type;
@@ -48,9 +41,6 @@ struct MetalDebris {
     bool     triggered;
 };
 
-// ============================================================
-// MineField — حقل الألغام + القطع المعدنية العشوائية
-// ============================================================
 class MineField : public cSimpleModule
 {
   public:
@@ -79,7 +69,6 @@ class MineField : public cSimpleModule
     double backgroundNoise;
     double noiseVariation;
 
-    // رسومات Canvas 2D
     std::vector<cGroupFigure*>  mineFigures;
     std::vector<cGroupFigure*>  debrisFigures;
 
@@ -89,12 +78,18 @@ class MineField : public cSimpleModule
     void addLegend();
 
 #ifdef WITH_OSG
-    // رسومات OSG 3D
     std::vector<osg::ref_ptr<osg::MatrixTransform>> mineOsgNodes;
     std::vector<osg::ref_ptr<osg::MatrixTransform>> debrisOsgNodes;
 
+    // [FIX]: getOrCreateOsgScene بدلاً من setupOsgScene
+    // لا تستدعي setOsgCanvas() — غير موجودة في cModule
+    // تستخدم فقط getOsgCanvas() + setScene() على cOsgCanvas
+    osg::ref_ptr<osg::Group> getOrCreateOsgScene();
+
+    void addGroundPlane(osg::ref_ptr<osg::Group> scene);
     void createMineOsgVisuals();
     void createDebrisOsgVisuals();
+
     osg::ref_ptr<osg::MatrixTransform> makeSphere(double x, double y, double z,
                                                    double radius,
                                                    float r, float g, float b);
