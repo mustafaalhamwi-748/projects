@@ -69,7 +69,7 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
     size_t xPos    = msgText.find(",x=");
     size_t yPos    = msgText.find(",y=");
     size_t confPos = msgText.find(",conf=");   // [تم التصحيح]: كان ",conf" بدون "="
-    size_t magPos  = msgText.find(",magVal="); // [إضافة]: لتحديد نهاية y بدقة
+    // magPos حُذف — confPos يكفي لتحديد نهاية y في السطر 81
 
     if (xPos == std::string::npos || yPos == std::string::npos ||
         confPos == std::string::npos) {
