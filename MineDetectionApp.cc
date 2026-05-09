@@ -5,7 +5,6 @@
 #include "inet/transportlayer/contract/udp/UdpControlInfo_m.h"
 #include "inet/common/packet/Packet.h"
 #include "inet/common/TagBase_m.h"
-// [NEW]: مطلوب لتعديل constraintArea والارتفاع في وقت التشغيل
 #include "inet/mobility/base/MovingMobilityBase.h"
 
 #include <cmath>
@@ -18,12 +17,15 @@ namespace uavminedetection {
 
 Define_Module(MineDetectionApp);
 
-simsignal_t MineDetectionApp::detectionSignal  = registerSignal("mineDetected");
-simsignal_t MineDetectionApp::coverageSignal   = registerSignal("areaCoverage");
-simsignal_t MineDetectionApp::falseAlarmSignal = registerSignal("falseAlarm");
+simsignal_t MineDetectionApp::detectionSignal      = registerSignal("mineDetected");
+simsignal_t MineDetectionApp::coverageSignal       = registerSignal("areaCoverage");
+simsignal_t MineDetectionApp::falseAlarmSignal     = registerSignal("falseAlarm");
+simsignal_t MineDetectionApp::adaptiveThreshSignal = registerSignal("adaptiveThreshold"); // [NEW]
+simsignal_t MineDetectionApp::correlatedNoiseSignal= registerSignal("correlatedNoise");   // [NEW]
 
 // ============================================================
 // initialize
+// [MODIFIED]: قراءة معاملات العتبة التكيفية وتمريرها للحساس
 // ============================================================
 void MineDetectionApp::initialize(int stage)
 {
@@ -36,11 +38,30 @@ void MineDetectionApp::initialize(int stage)
         magneticSaturation = par("magneticSaturation");
         falseAlarmProb     = par("falseAlarmProb");
         falseAlarmDisplayLimit = par("falseAlarmDisplayLimit");
-        confirmRadius      = par("confirmRadius");
+        confirmRadius          = par("confirmRadius");
+        confirmationTimeout    = par("confirmationTimeout");
         destPort           = par("destPort");
         localPort          = par("localPort");
 
-        sensor = new MagnetometerSensor(magneticThreshold, magneticSaturation);
+        // ── [NEW]: قراءة معاملات العتبة التكيفية ──────────────
+        adaptiveWindowSize   = par("adaptiveWindowSize");
+        adaptiveKSigma       = par("adaptiveKSigma");
+        adaptiveMinThreshold = par("adaptiveMinThreshold");
+
+        // ── [NEW]: قراءة معاملات الضوضاء المترابطة زمنياً ─────
+        sensorNoiseAlpha = par("sensorNoiseAlpha");
+        sensorNoiseScale = par("sensorNoiseScale");
+        correlatedNoise  = 0.0;  // تبدأ الضوضاء من الصفر عند بدء المحاكاة
+
+        // ── [MODIFIED]: إنشاء الحساس بالمعاملات التكيفية ──────
+        // الآن المنشئ يأخذ 5 معاملات بدلاً من 2
+        sensor = new MagnetometerSensor(
+            magneticThreshold,    // العتبة الثابتة (مرحلة الإحماء)
+            magneticSaturation,   // قيمة التشبع
+            adaptiveWindowSize,   // [NEW] حجم النافذة
+            adaptiveKSigma,       // [NEW] معامل الانحراف
+            adaptiveMinThreshold  // [NEW] الحد الأدنى الآمن
+        );
 
         WATCH(trueDetections);
         WATCH(falseAlarms);
@@ -48,7 +69,7 @@ void MineDetectionApp::initialize(int stage)
         WATCH(messagesSent);
         WATCH(lastMagneticValue);
         WATCH(isIntensiveMode);
-        WATCH(isReturningHome);   // [NEW]
+        WATCH(isReturningHome);
     }
     else if (stage == INITSTAGE_APPLICATION_LAYER) {
         mineField = check_and_cast<MineField*>(
@@ -60,7 +81,6 @@ void MineDetectionApp::initialize(int stage)
         socket.bind(localPort);
         socket.setCallback(this);
 
-        // حل عنوان GCS مرة واحدة
         try {
             L3AddressResolver().tryResolve("gcs", gcsAddress);
             if (gcsAddress.isUnspecified())
@@ -74,15 +94,18 @@ void MineDetectionApp::initialize(int stage)
 
         initSensorVisuals();
 
-        scanTimer      = new cMessage("scanTimer");
-        intensiveTimer = new cMessage("intensiveTimer");
-        returnHomeTimer= new cMessage("returnHomeTimer");   // [NEW]
+        scanTimer       = new cMessage("scanTimer");
+        intensiveTimer  = new cMessage("intensiveTimer");
+        returnHomeTimer = new cMessage("returnHomeTimer");
 
         scheduleAt(simTime() + uniform(0, scanInterval), scanTimer);
 
-        // ── [NEW]: جدولة العودة إلى القاعدة عند t=550s (50 ثانية قبل النهاية) ──
-        double returnHomeAt = 600.0 - RETURN_HOME_BEFORE; // = 550.0
+        double returnHomeAt = 600.0 - RETURN_HOME_BEFORE;
         scheduleAt(SimTime(returnHomeAt), returnHomeTimer);
+        EV_INFO << "UAV[" << uavId << "] Adaptive threshold ENABLED: "
+                << "window=" << adaptiveWindowSize
+                << " k=" << adaptiveKSigma
+                << " minThr=" << adaptiveMinThreshold << " nT\n";
         EV_INFO << "UAV[" << uavId << "] Return-home scheduled at t="
                 << returnHomeAt << "s\n";
     }
@@ -90,10 +113,6 @@ void MineDetectionApp::initialize(int stage)
 
 // ============================================================
 // setFlightAltitude
-// ──────────────────────────────────────────────────────────────
-// يستدعي LawnmowerMobility::setAltitude() التي تغيّر المتغير
-// الداخلي altitude مباشرة — هذا هو الحل الصحيح لأن تغيير par()
-// وحده لا يؤثر على المتغير الداخلي المخزَّن منذ initialize().
 // ============================================================
 void MineDetectionApp::setFlightAltitude(double altMeters)
 {
@@ -102,39 +121,28 @@ void MineDetectionApp::setFlightAltitude(double altMeters)
 }
 
 // ============================================================
-// [NEW] initiateReturnHome
-// ──────────────────────────────────────────────────────────────
-// يُفعَّل عند t=550s: توقف عن المسح والتوجه نحو GCS
+// initiateReturnHome
 // ============================================================
 void MineDetectionApp::initiateReturnHome()
 {
-    if (isReturningHome) return;  // تجنب الاستدعاء المزدوج
+    if (isReturningHome) return;
 
     isReturningHome = true;
 
-    // إلغاء كل المؤقتات النشطة
-    if (scanTimer && scanTimer->isScheduled())
-        cancelEvent(scanTimer);
-    if (intensiveTimer && intensiveTimer->isScheduled())
-        cancelEvent(intensiveTimer);
+    if (scanTimer && scanTimer->isScheduled())       cancelEvent(scanTimer);
+    if (intensiveTimer && intensiveTimer->isScheduled()) cancelEvent(intensiveTimer);
 
-    // الخروج من وضع المسح الحلزوني إن كان نشطاً
     if (isIntensiveMode) {
         isIntensiveMode = false;
         auto *lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
         if (lawnmower) lawnmower->stopSpiral();
     }
 
-    // العودة إلى الارتفاع الطبيعي قبل التوجه
     setFlightAltitude(CRUISE_ALTITUDE);
 
-    // توجيه الطائرة نحو GCS عبر Spiral مبسّط باتجاه النقطة الهدف
-    // الأنسب: نستخدم startSpiral مع نقطة GCS ليتقارب إليها الحلزون
-    // أو ببساطة نجعل LawnmowerMobility يتجه مباشرة لـ GCS
     auto *lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
-    if (lawnmower) {
+    if (lawnmower)
         lawnmower->goHome(GCS_X, GCS_Y, CRUISE_ALTITUDE);
-    }
 
     EV_INFO << "UAV[" << uavId << "] Returning to GCS at ("
             << GCS_X << ", " << GCS_Y << ") -- t=" << simTime() << "s\n";
@@ -142,6 +150,7 @@ void MineDetectionApp::initiateReturnHome()
 
 // ============================================================
 // initSensorVisuals
+// [MODIFIED]: إضافة عنصر بصري لعرض العتبة التكيفية الحالية
 // ============================================================
 void MineDetectionApp::initSensorVisuals()
 {
@@ -171,6 +180,17 @@ void MineDetectionApp::initSensorVisuals()
     sensorValueFigure->setFont(cFigure::Font("", 7, cFigure::FONT_BOLD));
     canvas->addFigure(sensorValueFigure);
 
+    // ── [NEW]: عنصر بصري لعرض العتبة التكيفية ────────────────
+    // يظهر تحت الطائرة: "Thr:250" (ثابتة) أو "AThr:320" (تكيفية)
+    std::string thrName = "adaptiveThr_" + std::to_string(uavId);
+    adaptiveThreshFigure = new cTextFigure(thrName.c_str());
+    adaptiveThreshFigure->setPosition(cFigure::Point(cx, cy + 22));
+    adaptiveThreshFigure->setText("Thr:---");
+    adaptiveThreshFigure->setColor(cFigure::Color(100, 100, 100));
+    adaptiveThreshFigure->setAnchor(cFigure::ANCHOR_N);
+    adaptiveThreshFigure->setFont(cFigure::Font("", 6, 0));
+    canvas->addFigure(adaptiveThreshFigure);
+
     std::string barBgName = "magBarBg_" + std::to_string(uavId);
     sensorBarBg = new cRectangleFigure(barBgName.c_str());
     sensorBarBg->setBounds(cFigure::Rectangle(cx-12, cy+14, 24, 4));
@@ -189,33 +209,48 @@ void MineDetectionApp::initSensorVisuals()
     canvas->addFigure(sensorBarFg);
 }
 
-cFigure::Color MineDetectionApp::getMagneticColor(double magVal) const
+// ============================================================
+// getMagneticColor
+// [MODIFIED]: تأخذ العتبة الفعّالة كمعامل بدلاً من الثابتة
+// ============================================================
+cFigure::Color MineDetectionApp::getMagneticColor(double magVal, double threshold) const
 {
-    double ratio = magVal / magneticThreshold;
+    double ratio = magVal / threshold;
     if (ratio < 0.8)       return cFigure::Color(0, 100, 255);
     else if (ratio < 1.0)  return cFigure::Color(255, 200, 0);
     else if (ratio < 1.5)  return cFigure::Color(255, 120, 0);
     else                   return cFigure::Color(220, 0, 0);
 }
 
-double MineDetectionApp::getMagneticRadius(double magVal) const
+// ============================================================
+// getMagneticRadius
+// [MODIFIED]: تأخذ العتبة الفعّالة كمعامل بدلاً من الثابتة
+// ============================================================
+double MineDetectionApp::getMagneticRadius(double magVal, double threshold) const
 {
-    double ratio = magVal / magneticThreshold;
+    double ratio = magVal / threshold;
     return 10.0 + std::min(18.0, ratio * 12.0);
 }
 
+// ============================================================
+// updateSensorVisuals
+// [MODIFIED]:
+//   1. استخدام sensor->getThreshold() للعتبة الفعّالة الحالية
+//   2. تحديث adaptiveThreshFigure لعرض نوع العتبة وقيمتها
+// ============================================================
 void MineDetectionApp::updateSensorVisuals(double magVal,
                                            double uavX, double uavY) const
 {
     if (!sensorRingFigure || !sensorValueFigure) return;
 
-    cFigure::Color color = getMagneticColor(magVal);
-    double R = getMagneticRadius(magVal);
+    // ── [MODIFIED]: استخدام العتبة الفعّالة من الحساس ──────────
+    double effectiveThr = sensor->getThreshold();
+    cFigure::Color color = getMagneticColor(magVal, effectiveThr);
+    double R = getMagneticRadius(magVal, effectiveThr);
 
     sensorRingFigure->setBounds(cFigure::Rectangle(uavX-R, uavY-R, 2*R, 2*R));
 
     if (isReturningHome) {
-        // [NEW]: حالة العودة — حلقة رمادية وخط متقطع
         sensorRingFigure->setFillColor(cFigure::Color(150, 150, 150));
         sensorRingFigure->setLineColor(cFigure::Color(100, 100, 100));
         sensorRingFigure->setLineWidth(2);
@@ -237,9 +272,9 @@ void MineDetectionApp::updateSensorVisuals(double magVal,
         sensorRingFigure->setFillColor(color);
         sensorRingFigure->setLineColor(color);
         sensorRingFigure->setLineWidth(2);
-        sensorRingFigure->setFillOpacity((magVal >= magneticThreshold) ? 0.35 : 0.18);
+        sensorRingFigure->setFillOpacity((magVal >= effectiveThr) ? 0.35 : 0.18);
         char buf[32];
-        if (magVal >= magneticThreshold)
+        if (magVal >= effectiveThr)
             snprintf(buf, sizeof(buf), "! %.0f nT", magVal);
         else
             snprintf(buf, sizeof(buf), "%.0f nT", magVal);
@@ -249,18 +284,41 @@ void MineDetectionApp::updateSensorVisuals(double magVal,
 
     sensorValueFigure->setPosition(cFigure::Point(uavX, uavY - 18));
 
+    // ── [NEW]: تحديث عرض العتبة التكيفية ──────────────────────
+    if (adaptiveThreshFigure) {
+        char thrBuf[40];
+        if (sensor->isAdaptiveReady()) {
+            // النافذة ممتلئة: عرض العتبة التكيفية بلون أخضر داكن
+            snprintf(thrBuf, sizeof(thrBuf), "A:%.0fnT", effectiveThr);
+            adaptiveThreshFigure->setColor(cFigure::Color(0, 130, 0));
+        } else {
+            // مرحلة الإحماء: عرض تقدم ملء النافذة بلون رمادي
+            snprintf(thrBuf, sizeof(thrBuf), "W:%d/%d",
+                     sensor->getWindowFill(), sensor->getWindowSize());
+            adaptiveThreshFigure->setColor(cFigure::Color(120, 120, 120));
+        }
+        adaptiveThreshFigure->setText(thrBuf);
+        adaptiveThreshFigure->setPosition(cFigure::Point(uavX, uavY + 22));
+    }
+
+    // ── شريط التعبئة ──────────────────────────────────────────
     if (sensorBarBg && sensorBarFg) {
         sensorBarBg->setBounds(cFigure::Rectangle(uavX-12, uavY+14, 24, 4));
-        double fillRatio = std::min(1.0, magVal / (1.5 * magneticThreshold));
+        // [MODIFIED]: نسبة التعبئة تعتمد على العتبة الفعّالة
+        double fillRatio = std::min(1.0, magVal / (1.5 * effectiveThr));
         sensorBarFg->setBounds(cFigure::Rectangle(
             uavX-12, uavY+14, std::max(1.0, fillRatio * 24.0), 4));
         if (isReturningHome)
             sensorBarFg->setFillColor(cFigure::Color(150, 150, 150));
         else
-            sensorBarFg->setFillColor(isIntensiveMode ? cFigure::Color(255,0,0) : color);
+            sensorBarFg->setFillColor(
+                isIntensiveMode ? cFigure::Color(255,0,0) : color);
     }
 }
 
+// ============================================================
+// checkTimeouts
+// ============================================================
 void MineDetectionApp::checkTimeouts()
 {
     auto it = candidateMines.begin();
@@ -278,6 +336,9 @@ void MineDetectionApp::checkTimeouts()
     }
 }
 
+// ============================================================
+// confirmTarget
+// ============================================================
 void MineDetectionApp::confirmTarget(inet::Coord targetPos,
                                      double confidence, double magVal)
 {
@@ -312,9 +373,23 @@ void MineDetectionApp::confirmTarget(inet::Coord targetPos,
     }
 }
 
+// ============================================================
+// performScan — قلب عملية الكشف
+//
+// [MODIFIED v3]: ثلاث خطوات رئيسية الآن:
+//   1. rawMagVal ← قراءة الإشارة الخام من MineField
+//   2. correlatedNoise ← تحديث الضوضاء المترابطة AR(1)  ← [NEW]
+//   3. sensor->addReading(magVal) ← تغذية النافذة التكيفية
+//   4. emit(adaptiveThreshSignal) ← تسجيل العتبة
+//
+// الترتيب مهم:
+//   أولاً: اقرأ الخام ← قبل أي معالجة
+//   ثانياً: طبّق ضوضاء الحساس ← القيمة التي "يراها" الحساس فعلاً
+//   ثالثاً: غذّ النافذة بالقيمة المشوّشة ← العتبة تتكيف مع الواقع
+//   رابعاً: اقرر بالعتبة الفعّالة المُحدَّثة
+// ============================================================
 void MineDetectionApp::performScan()
 {
-    // لا مسح إذا كانت الطائرة في طريق العودة
     if (isReturningHome) return;
 
     checkTimeouts();
@@ -328,10 +403,69 @@ void MineDetectionApp::performScan()
         }
     }
 
-    double magVal = mineField->getMagneticValue(pos.x, pos.y);
+    // ── الخطوة 1: قراءة المجال المغناطيسي الخام من MineField ───
+    // القيمة الخام = إشارة الألغام + ضوضاء التربة البيضاء
+    double rawMagVal = mineField->getMagneticValue(pos.x, pos.y, pos.z);
+
+    // ── [NEW] الخطوة 2: الضوضاء المترابطة زمنياً — نموذج AR(1) ─
+    //
+    // الفيزياء المُمثَّلة: انجراف الحساس الإلكتروني (sensor drift)
+    //   - اهتزاز الطائرة يُربك الحساس باستمرار
+    //   - تغيّر درجة الحرارة يُسبّب انجرافاً تدريجياً
+    //   - تشويش محركات الطائرة يتغيّر ببطء
+    //   كل هذه العوامل تجعل ضوضاء الحساس مترابطة زمنياً، لا مستقلة.
+    //
+    // المعادلة (سطر واحد):
+    //   η(t) = α·η(t-1) + (1−α)·w(t)
+    //   حيث w(t) ~ Uniform(-scale, +scale) هي "الابتكار العشوائي"
+    //
+    // التفسير المادي:
+    //   α=0.8: الانجراف الحالي = 80% من السابق + 20% من الاضطراب الجديد
+    //   هذا يعني الانجراف يتغيّر بالكامل تقريباً كل 5 قراءات (~2.5 ثانية)
+    //   مقارنةً بضوضاء بيضاء تتغيّر كلياً كل قراءة (0.5 ثانية)
+    //
+    // التأثير على الكشف:
+    //   ضوضاء بيضاء: قراءات مرتفعة عشوائية مستقلة → إنذارات كاذبة منفردة
+    //   ضوضاء مترابطة: قراءات مرتفعة متتالية → "موجة" من الإنذارات الكاذبة
+    //   هذا أكثر واقعية ويُصعّب قرار التأكيد
+    double innovation  = uniform(-sensorNoiseScale, sensorNoiseScale);
+    correlatedNoise    = sensorNoiseAlpha * correlatedNoise
+                       + (1.0 - sensorNoiseAlpha) * innovation;
+
+    // القيمة النهائية التي "يراها" الحساس
+    // = إشارة حقيقية + ضوضاء تربة (بيضاء) + انجراف حساس (مترابط)
+    double magVal = rawMagVal + correlatedNoise;
     lastMagneticValue = magVal;
+
+    // تسجيل قيمة الانجراف للإحصاءات (للرسوم البيانية في IDE)
+    emit(correlatedNoiseSignal, correlatedNoise);
+
+    // ── [NEW] الخطوة 2: إضافة القراءة للنافذة المنزلقة ────────
+    // هذا يُحدّث العتبة التكيفية تلقائياً بعد امتلاء النافذة.
+    // الترتيب مقصود: نُغذّي النافذة أولاً ثم نقيس،
+    // لأن القراءة الحالية جزء من بيئة الطائرة الراهنة.
+    sensor->addReading(magVal);
+
+    // ── [NEW] الخطوة 3: تسجيل العتبة الحالية كإحصائية ─────────
+    // يُمكّن رسم تطور العتبة عبر الزمن في OMNeT++ IDE
+    emit(adaptiveThreshSignal, sensor->getThreshold());
+
+    // سجّل في EV عند التحول من الثابتة إلى التكيفية
+    if (sensor->getWindowFill() == sensor->getWindowSize()) {
+        static bool adaptiveLoggedOnce[10] = {false};
+        if (uavId >= 0 && uavId < 10 && !adaptiveLoggedOnce[uavId]) {
+            adaptiveLoggedOnce[uavId] = true;
+            EV_INFO << "UAV[" << uavId << "] >>> ADAPTIVE THRESHOLD ACTIVE: "
+                    << "mean=" << sensor->getWindowMean()
+                    << " sigma=" << sensor->getWindowStdDev()
+                    << " thr=" << sensor->getAdaptiveThreshold() << " nT <<<\n";
+        }
+    }
+
+    // ── الخطوة 4: تحديث العناصر البصرية ─────────────────────
     updateSensorVisuals(magVal, pos.x, pos.y);
 
+    // ── الخطوة 5: قرار الكشف بالعتبة الفعّالة ──────────────
     SensorReading reading = sensor->measure(magVal);
 
     if (reading.isMine) {
@@ -341,7 +475,8 @@ void MineDetectionApp::performScan()
                 isAlreadyCandidate = true;
                 if (it->firstDetectorId != uavId) {
                     EV_INFO << "UAV[" << uavId << "] CROSS-VALIDATED from UAV["
-                            << it->firstDetectorId << "]\n";
+                            << it->firstDetectorId << "] — thr="
+                            << reading.effectiveThreshold << "nT\n";
                     confirmTarget(it->pos, reading.confidence, reading.magneticValue);
                     candidateMines.erase(it);
                 } else {
@@ -352,6 +487,11 @@ void MineDetectionApp::performScan()
         }
 
         if (!isAlreadyCandidate) {
+            EV_INFO << "UAV[" << uavId << "] NEW CANDIDATE at ("
+                    << pos.x << "," << pos.y << ") magVal=" << magVal
+                    << " thr=" << reading.effectiveThreshold
+                    << (sensor->isAdaptiveReady() ? " [ADAPTIVE]" : " [STATIC]") << "\n";
+
             CandidateMine newCand = {pos, simTime(), uavId,
                                      reading.confidence, reading.magneticValue};
             candidateMines.push_back(newCand);
@@ -366,6 +506,10 @@ void MineDetectionApp::performScan()
     scheduleAt(simTime() + scanInterval, scanTimer);
 }
 
+// ============================================================
+// refreshDisplay
+// [MODIFIED]: عرض معلومات العتبة التكيفية في نص الطائرة
+// ============================================================
 void MineDetectionApp::refreshDisplay() const
 {
     if (mobility && sensorRingFigure) {
@@ -373,20 +517,37 @@ void MineDetectionApp::refreshDisplay() const
         updateSensorVisuals(lastMagneticValue, pos.x, pos.y);
     }
 
-    char buf[120];
+    char buf[160];
     if (isReturningHome) {
         snprintf(buf, sizeof(buf),
-                 "UAV%d | RTH → GCS | found=%d | FA=%d",
+                 "UAV%d | RTH→GCS | found=%d | FA=%d",
                  uavId, trueDetections, falseAlarms);
-    } else {
+    }
+    else if (sensor->isAdaptiveReady()) {
+        // [NEW]: عرض العتبة التكيفية + الانجراف الحالي للحساس
         snprintf(buf, sizeof(buf),
-                 "UAV%d | %.0f nT | found=%d | FA=%d | Pend=%zu",
-                 uavId, lastMagneticValue, trueDetections,
-                 falseAlarms, candidateMines.size());
+                 "UAV%d | %.0fnT | Thr:%.0f(A) | η:%.0f | found=%d FA=%d | P=%zu",
+                 uavId, lastMagneticValue,
+                 sensor->getAdaptiveThreshold(),
+                 correlatedNoise,
+                 trueDetections, falseAlarms, candidateMines.size());
+    }
+    else {
+        // مرحلة الإحماء: عرض تقدم ملء النافذة + الانجراف
+        snprintf(buf, sizeof(buf),
+                 "UAV%d | %.0fnT | Thr:%.0f(S) W:%d/%d | η:%.0f | found=%d FA=%d",
+                 uavId, lastMagneticValue,
+                 sensor->getStaticThreshold(),
+                 sensor->getWindowFill(), sensor->getWindowSize(),
+                 correlatedNoise,
+                 trueDetections, falseAlarms);
     }
     getParentModule()->getDisplayString().setTagArg("t", 0, buf);
 }
 
+// ============================================================
+// sendNetworkMessage
+// ============================================================
 void MineDetectionApp::sendNetworkMessage(const char* type,
                                           double x, double y,
                                           double confidence,
@@ -426,32 +587,26 @@ void MineDetectionApp::sendNetworkMessage(const char* type,
     messagesSent++;
 }
 
+// ============================================================
+// calculateCoverage — عداد تراكمي
+// ============================================================
 double MineDetectionApp::calculateCoverage()
 {
-    const int G = 50;
-    const double AREA = 1000.0;
-    int cov = 0;
-    cModule *net = getSystemModule();
-    int nUAV = net->par("numUAVs");
-    const double sensorCovRange = 10.0;
+    const int    G = 50;
+    const double S = 1000.0 / G;
 
-    for (int i = 0; i < G; i++) {
-        for (int j = 0; j < G; j++) {
-            double px = (i + 0.5) * (AREA / G);
-            double py = (j + 0.5) * (AREA / G);
-            for (int u = 0; u < nUAV; u++) {
-                IMobility *mob = check_and_cast<IMobility*>(
-                    net->getSubmodule("uav", u)->getSubmodule("mobility"));
-                if (mob->getCurrentPosition().distance(Coord(px, py, 0))
-                        <= sensorCovRange) {
-                    cov++; break;
-                }
-            }
-        }
-    }
-    return (double)cov / (G * G) * 100.0;
+    Coord pos = mobility->getCurrentPosition();
+    int col = (int)(pos.x / S);
+    int row = (int)(pos.y / S);
+    col = std::max(0, std::min(G - 1, col));
+    row = std::max(0, std::min(G - 1, row));
+    visitedCells.insert(col * G + row);
+    return (double)visitedCells.size() / (double)(G * G) * 100.0;
 }
 
+// ============================================================
+// addFalseAlarmFigure
+// ============================================================
 void MineDetectionApp::addFalseAlarmFigure(double x, double y)
 {
     if (falseAlarmDisplayLimit >= 0 &&
@@ -480,12 +635,9 @@ void MineDetectionApp::addFalseAlarmFigure(double x, double y)
 
 // ============================================================
 // startIntensiveSearch
-// ── [MODIFIED]: يُضيف تغيير الارتفاع إلى 30م عند الدخول
-//               في المسح الحلزوني، والعودة إلى 80م عند الخروج
 // ============================================================
 void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
 {
-    // تجاهل الأمر إذا كانت الطائرة تعود للقاعدة
     if (isReturningHome) return;
 
     Coord pos = mobility->getCurrentPosition();
@@ -495,13 +647,11 @@ void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
                 << cmdX << "," << cmdY << ") — descending to "
                 << SCAN_ALTITUDE << "m\n";
 
-        // ── [FIX]: ابدأ الحلزون أولاً لحفظ savedPosition على z=80م
-        //          ثم اخفض الارتفاع — هكذا عند stopSpiral() تعود z إلى 80م ──
         auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
         if (lawnmower)
             lawnmower->startSpiral(cmdX, cmdY);
 
-        setFlightAltitude(SCAN_ALTITUDE);  // ينزل إلى 30م بعد حفظ savedPosition
+        setFlightAltitude(SCAN_ALTITUDE);
 
         cancelEvent(intensiveTimer);
         scheduleAt(simTime() + 20.0, intensiveTimer);
@@ -510,7 +660,6 @@ void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
 
 // ============================================================
 // handleMessageWhenUp
-// ── [MODIFIED]: إضافة معالجة returnHomeTimer
 // ============================================================
 void MineDetectionApp::handleMessageWhenUp(cMessage *msg)
 {
@@ -525,11 +674,9 @@ void MineDetectionApp::handleMessageWhenUp(cMessage *msg)
         auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
         if (lawnmower) lawnmower->stopSpiral();
 
-        // ── [NEW]: العودة إلى الارتفاع الطبيعي 80م ──
         setFlightAltitude(CRUISE_ALTITUDE);
     }
     else if (msg == returnHomeTimer) {
-        // ── [NEW]: حان وقت العودة إلى القاعدة ──
         EV_INFO << "UAV[" << uavId << "] Return-home timer fired at t="
                 << simTime() << "s — initiating RTH sequence.\n";
         initiateReturnHome();
@@ -616,6 +763,10 @@ void MineDetectionApp::socketErrorArrived(UdpSocket *, Indication *ind)
     delete ind;
 }
 
+// ============================================================
+// finish
+// [MODIFIED]: إضافة إحصاءات العتبة التكيفية في التقرير النهائي
+// ============================================================
 void MineDetectionApp::finish()
 {
     EV_INFO << "\n=== UAV[" << uavId << "] Final Statistics ===\n";
@@ -625,19 +776,40 @@ void MineDetectionApp::finish()
     EV_INFO << "Messages Sent     : " << messagesSent      << "\n";
     EV_INFO << "Returned to Home  : " << (isReturningHome ? "YES" : "NO") << "\n";
 
+    // [NEW]: تقرير العتبة التكيفية
+    if (sensor->isAdaptiveReady()) {
+        EV_INFO << "Final Adaptive Threshold: "
+                << sensor->getAdaptiveThreshold() << " nT"
+                << " (mean=" << sensor->getWindowMean()
+                << " sigma=" << sensor->getWindowStdDev() << ")\n";
+    } else {
+        EV_INFO << "Adaptive Threshold: NOT REACHED (window only "
+                << sensor->getWindowFill() << "/" << sensor->getWindowSize()
+                << " filled — static threshold used throughout)\n";
+    }
+
     if (uavId == 0) {
         EV_INFO << "\n=== Network Summary ===\n";
-        EV_INFO << "Total Mines  : " << mineField->getNumMines()       << "\n";
-        EV_INFO << "Mines Found  : " << mineField->getDiscoveredCount()<< "\n";
+        EV_INFO << "Total Mines  : " << mineField->getNumMines()        << "\n";
+        EV_INFO << "Mines Found  : " << mineField->getDiscoveredCount() << "\n";
         EV_INFO << "Detection Rate: "
                 << (double)mineField->getDiscoveredCount()
                    / mineField->getNumMines() * 100.0 << "%\n";
     }
 
-    recordScalar("trueDetections",   trueDetections);
-    recordScalar("falseAlarms",      falseAlarms);
-    recordScalar("duplicatesSkipped",duplicatesSkipped);
-    recordScalar("returnedHome",     isReturningHome ? 1.0 : 0.0);
+    recordScalar("trueDetections",          trueDetections);
+    recordScalar("falseAlarms",             falseAlarms);
+    recordScalar("duplicatesSkipped",       duplicatesSkipped);
+    recordScalar("returnedHome",            isReturningHome ? 1.0 : 0.0);
+    // [NEW]: تسجيل القيم النهائية للعتبة التكيفية
+    recordScalar("finalAdaptiveThreshold",  sensor->getAdaptiveThreshold());
+    recordScalar("finalWindowMean",         sensor->getWindowMean());
+    recordScalar("finalWindowStdDev",       sensor->getWindowStdDev());
+    // [NEW]: تسجيل الانجراف النهائي للحساس
+    recordScalar("finalCorrelatedNoise",    correlatedNoise);
+
+    delete sensor;
+    sensor = nullptr;
 }
 
 void MineDetectionApp::handleStartOperation(LifecycleOperation *)
@@ -659,7 +831,7 @@ void MineDetectionApp::handleStartOperation(LifecycleOperation *)
 
 void MineDetectionApp::handleStopOperation(LifecycleOperation *)
 {
-    if (scanTimer && scanTimer->isScheduled())       cancelEvent(scanTimer);
+    if (scanTimer && scanTimer->isScheduled())           cancelEvent(scanTimer);
     if (intensiveTimer && intensiveTimer->isScheduled()) cancelEvent(intensiveTimer);
     if (returnHomeTimer && returnHomeTimer->isScheduled()) cancelEvent(returnHomeTimer);
     socket.close();
