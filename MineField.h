@@ -25,11 +25,11 @@ namespace uavminedetection {
 
 // ============================================================
 // MinePos — بيانات اللغم الواحد
-// depth: عمق الدفن بالمتر (0.05 – 0.40 م)
 // ============================================================
 struct MinePos {
     double x, y;
     double depth;       // عمق الدفن (متر)
+    double shapeFactor; // معامل الشكل والاتجاه للغم
     bool   discovered;
 };
 
@@ -45,13 +45,6 @@ struct MetalDebris {
 class MineField : public cSimpleModule
 {
   public:
-    // ============================================================
-    // getMagneticValue — [MODIFIED v3]: يقبل uavId للضوضاء المترابطة
-    //
-    // كل طائرة تحتفظ بحالة ضوضائها السابقة منفصلة عن البقية.
-    // هذا يعكس الواقع: طائرتان في نفس المنطقة تقرآن نفس الإشارة
-    // الحقيقية لكن كل حساس له تاريخه الخاص من الضوضاء.
-    // ============================================================
     double getMagneticValue(double uavX, double uavY, double uavZ) const;
 
     int    getNearestUndiscoveredMine(double x, double y, double radius) const;
@@ -83,20 +76,13 @@ class MineField : public cSimpleModule
     double backgroundNoise;
     double noiseVariation;
 
-    // معاملات عمق الدفن
+    // معاملات التربة والعمق
     double minDepth;
     double maxDepth;
     double soilAttenuation;
+    double soilTypeFactor;
 
-    // ── [NEW]: معامل الضوضاء المترابطة زمنياً ─────────────────
-    // نموذج AR(1): noise[t] = α × noise[t-1] + (1-α) × white[t]
-    // α=0.0 → ضوضاء بيضاء مستقلة (السلوك القديم)
-    // α=0.7 → ترابط معتدل (موصى به)
-    // α=0.95→ ضوضاء تتغير ببطء شديد
     double noiseCorrelation;
-
-    // ── [NEW]: حالة الضوضاء الحالية لكل طائرة (مُعلَّم mutable
-    //    لأن getMagneticValue تحتاج تعديله وهي معرَّفة const)
     mutable std::map<int, double> prevNoise;
 
     std::vector<cGroupFigure*>  mineFigures;

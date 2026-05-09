@@ -13,10 +13,10 @@ void MineField::initialize()
     backgroundNoise  = par("backgroundNoise");
     noiseVariation   = par("noiseVariation");
 
-    // [NEW]: قراءة معاملات العمق
     minDepth        = par("minDepth");
     maxDepth        = par("maxDepth");
     soilAttenuation = par("soilAttenuation");
+    soilTypeFactor  = par("soilTypeFactor");
 
     struct { double x, y; } minePos[] = {
         {  80,  120}, { 220,  75}, { 380, 160}, { 530,  90},
@@ -29,13 +29,14 @@ void MineField::initialize()
     int nm = (int)(sizeof(minePos) / sizeof(minePos[0]));
     mines.clear();
 
-    // [NEW]: عمق عشوائي لكل لغم
+    // إعطاء كل لغم خصائص عشوائية تشمل العمق ومعامل الشكل
     for (int i = 0; i < nm; i++) {
         MinePos m;
-        m.x          = minePos[i].x;
-        m.y          = minePos[i].y;
-        m.depth      = uniform(minDepth, maxDepth);
-        m.discovered = false;
+        m.x           = minePos[i].x;
+        m.y           = minePos[i].y;
+        m.depth       = uniform(minDepth, maxDepth);
+        m.shapeFactor = uniform(0.5, 1.5);
+        m.discovered  = false;
         mines.push_back(m);
     }
 
@@ -88,7 +89,7 @@ void MineField::initialize()
     createDebrisOsgVisuals();
 #endif
 
-    // طباعة إحصاءات الأعماق
+    // طباعة الإحصاءات
     double minD=maxDepth, maxD=minDepth, sumD=0.0;
     int shallow=0, medium=0, deep=0;
     for (const auto& m : mines) {
@@ -105,51 +106,35 @@ void MineField::initialize()
             << "  Shallow(<15cm)=" << shallow
             << " Medium(15-30cm)=" << medium
             << " Deep(>30cm)=" << deep << "\n"
-            << "  SoilAttenuation=" << soilAttenuation << "/m\n"
-            << "  Signal@5cm=" << (int)(exp(-soilAttenuation*0.05)*100)
-            << "%, @20cm=" << (int)(exp(-soilAttenuation*0.20)*100)
-            << "%, @40cm=" << (int)(exp(-soilAttenuation*0.40)*100) << "%\n";
+            << "  SoilTypeFactor=" << soilTypeFactor << "\n"
+            << "  SoilAttenuation=" << soilAttenuation << "/m\n";
 }
 
-// ============================================================
-// getMagneticValue — [MODIFIED]: عمق الدفن + تخميد التربة
-//
-// التأثير المزدوج:
-//   1. المسافة الهندسية: dz = uavZ + mine.depth
-//      اللغم عند z=-depth، الطائرة عند z=+uavZ
-//   2. تخميد التربة (الأهم): exp(-soilAttenuation × depth)
-//      soilAttenuation=5.0/م:
-//        depth=5cm  → 78% من الإشارة الأصلية
-//        depth=20cm → 37% من الإشارة الأصلية
-//        depth=40cm → 14% من الإشارة الأصلية
-// ============================================================
 double MineField::getMagneticValue(double uavX, double uavY, double uavZ) const
 {
     double noise = backgroundNoise
                  + uniform(-noiseVariation / 2.0, noiseVariation / 2.0);
 
-    // تأثير الألغام مع العمق والتخميد
     double mineEffect = 0.0;
     for (const auto& mine : mines) {
         double dx = uavX - mine.x;
         double dy = uavY - mine.y;
-        // [NEW]: المسافة الرأسية تشمل عمق الدفن
         double dz = uavZ + mine.depth;
         double dist2 = dx*dx + dy*dy + dz*dz + 1.0;
 
-        // [NEW]: تخميد التربة - أسي مع العمق
-        double soilFactor = std::exp(-soilAttenuation * mine.depth);
+        // تخميد التربة بالنسبة للعمق
+        double depthAttenuation = std::exp(-soilAttenuation * mine.depth);
 
-        double e = (magneticConstant * soilFactor) / dist2;
+        // التأثير الشامل: الثابت المغناطيسي × معامل نوع التربة × معامل شكل اللغم × التخميد الرأسي
+        double e = (magneticConstant * soilTypeFactor * mine.shapeFactor * depthAttenuation) / dist2;
         if (e > mineEffect) mineEffect = e;
     }
 
-    // تأثير الحطام المعدني - على السطح (لا عمق، لا تخميد)
     double debrisEffect = 0.0;
     for (const auto& d : debris) {
         double dx = uavX - d.x;
         double dy = uavY - d.y;
-        double dz = uavZ;   // الحطام على السطح
+        double dz = uavZ;
         double dist2 = dx*dx + dy*dy + dz*dz + 1.0;
         double e = (magneticConstant * d.magneticStrength / 500.0) / dist2;
         if (e > debrisEffect) debrisEffect = e;
@@ -195,17 +180,15 @@ int MineField::getDiscoveredCount() const
     int cnt=0; for (const auto& m:mines) if (m.discovered) cnt++; return cnt;
 }
 
-// [NEW]: لون اللغم يعكس عمقه
 cFigure::Color MineField::getMineColorByDepth(double depth) const
 {
-    if      (depth < 0.15) return cFigure::Color(255,  30,  30); // أحمر فاتح (ضحل)
-    else if (depth < 0.30) return cFigure::Color(200,  50,   0); // أحمر برتقالي (متوسط)
-    else                   return cFigure::Color(140,   0,   0); // أحمر داكن (عميق)
+    if      (depth < 0.15) return cFigure::Color(255,  30,  30);
+    else if (depth < 0.30) return cFigure::Color(200,  50,   0);
+    else                   return cFigure::Color(140,   0,   0);
 }
 
 void MineField::drawFarmBackground() {}
 
-// [MODIFIED]: التسمية تعرض العمق + اللون يعكس قابلية الاكتشاف
 void MineField::createMineVisuals()
 {
     cCanvas *canvas = getSystemModule()->getCanvas();
@@ -242,7 +225,6 @@ void MineField::createMineVisuals()
             grp->addFigure(sp);
         }
 
-        // [NEW]: تسمية تعرض رقم اللغم وعمقه — مثال: "M3 (12cm)"
         char lblTxt[24];
         snprintf(lblTxt, sizeof(lblTxt), "M%zu\n%.0fcm", i+1, mines[i].depth*100.0);
         auto *lbl = new cTextFigure("label");
@@ -281,7 +263,6 @@ void MineField::createDebrisVisuals()
     }
 }
 
-// [MODIFIED]: أضيفت فئات اللون للعمق في Legend
 void MineField::addLegend()
 {
     cCanvas *canvas = getSystemModule()->getCanvas();
@@ -341,7 +322,6 @@ void MineField::addLegend()
     canvas->addFigure(lg);
 }
 
-// [MODIFIED]: اللون في refreshDisplay يعكس العمق أيضاً
 void MineField::refreshDisplay() const
 {
     for (size_t i=0;i<mineFigures.size()&&i<mines.size();i++) {
@@ -449,7 +429,6 @@ osg::ref_ptr<osg::MatrixTransform> MineField::makeBox(
     mt->setMatrix(osg::Matrix::translate(x,y,z)); mt->addChild(geode);
     return mt;
 }
-// [MODIFIED]: حجم الكرة يعكس قوة إشارة اللغم (الأكبر = أسهل اكتشافاً)
 void MineField::createMineOsgVisuals()
 {
     osg::ref_ptr<osg::Group> scene=getOrCreateOsgScene();
