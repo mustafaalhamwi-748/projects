@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <vector>    // [FIX]: مطلوب لـ std::vector في recomputeThreshold
 
 namespace uavminedetection {
 
@@ -44,47 +45,57 @@ void MagnetometerSensor::addReading(double value)
 }
 
 // ============================================================
-// recomputeThreshold — قلب منطق العتبة التكيفية
+// recomputeThreshold — [MODIFIED v3]: Median + MAD (مقدّر قوي)
 //
-// الخطوات:
-//   1. حساب المتوسط (mean)
-//   2. حساب الانحراف المعياري (stdDev) — نستخدم N وليس N-1
-//      لأننا نُقدّر الخلفية لا عينة إحصائية
-//   3. العتبة = mean + kSigma × stdDev
-//   4. تطبيق الحد الأدنى الآمن (minThreshold)
+// لماذا التغيير من Mean+Sigma إلى Median+MAD؟
+//   عندما تطير الطائرة بارتفاع منخفض (وضع الحلزون)، تقرأ الحساس
+//   قيماً عالية جداً (2000-5000 nT) تدخل النافذة وترفع المتوسط
+//   والانحراف المعياري بشكل كبير → عتبة مرتفعة تُخفي الألغام!
 //
-// مثال عملي:
-//   تربة طينية: mean=400nT, stdDev=80nT, k=3.0
-//   → threshold = 400 + 3×80 = 640 nT
-//   (أعلى من العتبة الثابتة 250 — منطقي في تربة معدنية)
+//   Median: لا يتأثر بالقيم الشاذة (outliers)
+//   MAD = Median(|xi - Median|): مقاوم للتشويه أيضاً
+//   معامل 1.4826: يجعل MAD متوافقاً مع σ للتوزيع الطبيعي
 //
-//   تربة رملية: mean=220nT, stdDev=10nT, k=3.0
-//   → threshold = 220 + 3×10 = 250 nT
-//   (تساوي العتبة الثابتة تقريباً — منطقي في تربة نظيفة)
+// مثال:
+//   نافذة 50 قراءة: 30 خلفية@230nT + 20 لغم@3000nT
+//   Mean+Sigma: mean=1340, sigma=1200, threshold=4940 nT ← كارثي
+//   Median+MAD: median=230, MAD=0, threshold=230 nT     ← ممتاز!
 // ============================================================
 void MagnetometerSensor::recomputeThreshold()
 {
     const int N = (int)window.size();
 
-    // ── الخطوة 1: المتوسط ───────────────────────────────────
-    double sum = 0.0;
-    for (double v : window) sum += v;
-    windowMean = sum / N;
+    // ── الخطوة 1: الوسيط (Median) ────────────────────────────
+    std::vector<double> sorted(window.begin(), window.end());
+    std::sort(sorted.begin(), sorted.end());
 
-    // ── الخطوة 2: الانحراف المعياري ─────────────────────────
-    double varSum = 0.0;
-    for (double v : window) {
-        double diff = v - windowMean;
-        varSum += diff * diff;
-    }
-    windowStdDev = std::sqrt(varSum / N);
+    double median;
+    if (N % 2 == 0)
+        median = (sorted[N/2 - 1] + sorted[N/2]) / 2.0;
+    else
+        median = sorted[N/2];
 
-    // ── الخطوة 3: العتبة التكيفية ────────────────────────────
+    windowMean = median;  // نحفظ الوسيط في windowMean للعرض
+
+    // ── الخطوة 2: MAD (Median Absolute Deviation) ────────────
+    std::vector<double> deviations;
+    deviations.reserve(N);
+    for (double v : window)
+        deviations.push_back(std::abs(v - median));
+    std::sort(deviations.begin(), deviations.end());
+
+    double mad;
+    if (N % 2 == 0)
+        mad = (deviations[N/2 - 1] + deviations[N/2]) / 2.0;
+    else
+        mad = deviations[N/2];
+
+    // 1.4826: معامل التوافق مع الانحراف المعياري للتوزيع الطبيعي
+    // بدونه: MAD=σ/1.4826 → العتبة منخفضة جداً
+    windowStdDev = mad * 1.4826;
+
+    // ── الخطوة 3: العتبة = Median + k × MAD_scaled ───────────
     double computed = windowMean + kSigma * windowStdDev;
-
-    // ── الخطوة 4: تطبيق الحد الأدنى الآمن ───────────────────
-    // يضمن أن العتبة لن تنزل إلى مستوى الضوضاء الطبيعية
-    // حتى في المناطق ذات الخلفية المغناطيسية المنخفضة جداً
     adaptiveThreshold = std::max(minThreshold, computed);
 }
 

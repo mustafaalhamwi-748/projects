@@ -9,6 +9,7 @@
 #include "inet/common/packet/Packet.h"
 #include "inet/networklayer/common/L3Address.h"
 #include "inet/networklayer/common/L3AddressResolver.h"
+#include "inet/power/contract/IEpEnergyStorage.h"
 
 #include <omnetpp.h>
 #include <set>
@@ -31,33 +32,29 @@ struct CandidateMine {
 
 class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 {
+  public:
+    virtual ~MineDetectionApp(); // الهادم لتنظيف الذاكرة بأمان
+
   protected:
     int uavId = -1;
     double scanInterval = 0.5;
 
-    // ── معاملات الحساس الثابتة ─────────────────────────────
-    double magneticThreshold  = 0;   // عتبة ثابتة (مرحلة الإحماء)
+    double magneticThreshold  = 0;
     double magneticSaturation = 0;
     double falseAlarmProb     = 0;
     int    falseAlarmDisplayLimit = 30;
     double confirmRadius = 25.0;
 
-    // ── [NEW]: معاملات العتبة التكيفية ──────────────────────
-    int    adaptiveWindowSize   = 50;    // حجم النافذة المنزلقة
-    double adaptiveKSigma       = 3.0;  // معامل الانحراف المعياري
-    double adaptiveMinThreshold = 200.0; // الحد الأدنى المطلق (nT)
+    int    adaptiveWindowSize   = 50;
+    double adaptiveKSigma       = 3.0;
+    double adaptiveMinThreshold = 200.0;
 
-    // ── [NEW]: الضوضاء المترابطة زمنياً — نموذج AR(1) ──────────
-    // الفيزياء: انجراف الحساس الإلكتروني (drift) لا يتغيّر فجأة
-    // بين قراءة وأخرى، بل يتطور ببطء مثل سير عشوائي مُخمَّد.
-    //
-    // AR(1): η(t) = α·η(t-1) + (1−α)·w(t)
-    //   α → 1: تغيّر بطيء جداً (انجراف طويل الأمد)
-    //   α → 0: ضوضاء بيضاء مستقلة (السلوك القديم)
-    //   α = 0.8: الانجراف يُجدَّد كل ~5 قراءات تقريباً
-    double sensorNoiseAlpha = 0.8;   // معامل التلاشي [0, 1)
-    double sensorNoiseScale = 30.0;  // سعة الابتكار (nT)
-    double correlatedNoise  = 0.0;   // حالة الضوضاء الحالية (تُحدَّث في كل مسح)
+    double sensorNoiseAlpha = 0.8;
+    double sensorNoiseScale = 30.0;
+    double correlatedNoise  = 0.0;
+
+    inet::power::IEpEnergyStorage *energyStorage = nullptr;
+    double returnHomeEnergyThreshold = 0.3;
 
     int destPort  = -1;
     int localPort = -1;
@@ -71,25 +68,29 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     cMessage *scanTimer       = nullptr;
     cMessage *intensiveTimer  = nullptr;
-    cMessage *returnHomeTimer = nullptr;
+    cMessage *statusTimer     = nullptr;
 
-    // حالة الطائرة
     bool isIntensiveMode  = false;
     bool isReturningHome  = false;
 
-    static constexpr double RETURN_HOME_BEFORE = 50.0;
+    double maxSpiralMagVal = -1.0;
+    inet::Coord maxSpiralPos;
+    double spiralStopRatio = 1.2;
+
     static constexpr double GCS_X              = 500.0;
     static constexpr double GCS_Y              = 950.0;
     static constexpr double CRUISE_ALTITUDE    = 80.0;
-    static constexpr double SCAN_ALTITUDE      = 30.0;
+    // [FIX]: 30م→50م: عند 30م حطام WIRE/CAN/TOOL يعطي 277-442nT → إنذارات كاذبة كثيرة
+    //        عند 50م: حطام أقصاه 160nT (آمن) | ألغام 900-1800nT (مرئية جداً)
+    static constexpr double SCAN_ALTITUDE      = 50.0;
+    static constexpr double STATUS_INTERVAL    = 5.0;
+    static constexpr double RETURN_HOME_BEFORE = 50.0;
 
     std::vector<inet::Coord>   sharedMemory;
     std::vector<CandidateMine> candidateMines;
 
-    // العداد التراكمي للتغطية
     std::set<int> visitedCells;
 
-    // الإحصاءات
     int    trueDetections   = 0;
     int    falseAlarms      = 0;
     int    duplicatesSkipped= 0;
@@ -99,21 +100,20 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     double confirmationTimeout = 30.0;
 
-    // العناصر البصرية
     cOvalFigure     *sensorRingFigure  = nullptr;
     cTextFigure     *sensorValueFigure = nullptr;
     cRectangleFigure *sensorBarBg      = nullptr;
     cRectangleFigure *sensorBarFg      = nullptr;
-
-    // [NEW]: نص يعرض حالة العتبة التكيفية فوق الطائرة
     cTextFigure     *adaptiveThreshFigure = nullptr;
 
-    // الإشارات (Signals)
     static simsignal_t detectionSignal;
     static simsignal_t coverageSignal;
     static simsignal_t falseAlarmSignal;
-    static simsignal_t adaptiveThreshSignal;   // [NEW]
-    static simsignal_t correlatedNoiseSignal;  // [NEW]: تتبع الضوضاء المترابطة
+    static simsignal_t adaptiveThreshSignal;
+    static simsignal_t correlatedNoiseSignal;
+    static simsignal_t timeToConfirmSignal;
+    static simsignal_t uavsInvolvedSignal;
+    static simsignal_t confirmationConfidenceSignal;
 
   protected:
     virtual int numInitStages() const override { return NUM_INIT_STAGES; }
@@ -131,6 +131,7 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     virtual void socketClosed(UdpSocket *socket) override {}
 
     void performScan();
+    void broadcastStatus();
     void sendNetworkMessage(const char* type, double x, double y,
                             double confidence, double magneticValue);
     double calculateCoverage();
@@ -138,7 +139,6 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     void initSensorVisuals();
     void updateSensorVisuals(double magVal, double uavX, double uavY) const;
 
-    // [MODIFIED]: تأخذ الآن effectiveThreshold من الحساس لا من المتغير الثابت
     cFigure::Color getMagneticColor(double magVal, double threshold) const;
     double         getMagneticRadius(double magVal, double threshold) const;
 
@@ -147,6 +147,7 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     void checkTimeouts();
     void confirmTarget(inet::Coord targetPos, double confidence, double magVal);
     void startIntensiveSearch(double cmdX, double cmdY);
+    void redirectToArea(double targetX, double targetY);
 
     void initiateReturnHome();
     void setFlightAltitude(double altitudeMeters);

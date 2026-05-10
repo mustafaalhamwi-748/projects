@@ -10,6 +10,10 @@ simple GcsApp like IApp
         @class(uavminedetection::GcsApp);
         @display("i=block/app");
 
+        // [NEW]: إشارة التغطية الشاملة التراكمية لكل السرب
+        @signal[globalCoverage](type=double);
+        @statistic[globalCoverage](title="Global Swarm Area Coverage %"; record=mean,max,vector);
+
     gates:
         input socketIn;
         output socketOut;

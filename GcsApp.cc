@@ -8,6 +8,17 @@ namespace uavminedetection {
 
 Define_Module(GcsApp);
 
+simsignal_t GcsApp::globalCoverageSignal = registerSignal("globalCoverage");
+
+// ── الهادم لتنظيف آمن للذاكرة ──
+GcsApp::~GcsApp()
+{
+    if (coordinationTimer) {
+        cancelAndDelete(coordinationTimer);
+        coordinationTimer = nullptr;
+    }
+}
+
 void GcsApp::initialize(int stage)
 {
     ApplicationBase::initialize(stage);
@@ -22,19 +33,25 @@ void GcsApp::initialize(int stage)
         socket.setBroadcast(true);
         socket.setCallback(this);
 
+        coordinationTimer = new cMessage("coordinationTimer");
+        scheduleAt(simTime() + 10.0, coordinationTimer);
+
         EV_INFO << "Smart GCS Initialized. Listening on port " << localPort << "\n";
     }
 }
 
 void GcsApp::handleMessageWhenUp(cMessage *msg)
 {
-    if (msg->arrivedOn("socketIn")) socket.processMessage(msg);
+    if (msg == coordinationTimer) {
+        coordinateSwarm();
+        scheduleAt(simTime() + 10.0, coordinationTimer);
+    }
+    else if (msg->arrivedOn("socketIn")) {
+        socket.processMessage(msg);
+    }
     else delete msg;
 }
 
-// ============================================================
-// مساعد — فحص التكرار
-// ============================================================
 bool GcsApp::isDuplicate(const std::vector<inet::Coord>& map,
                          const inet::Coord& pos, double threshold) const
 {
@@ -44,13 +61,6 @@ bool GcsApp::isDuplicate(const std::vector<inet::Coord>& map,
     return false;
 }
 
-// ============================================================
-// socketDataArrived
-// [تم التصحيح]:
-//   1. خريطتان منفصلتان — realMineMap و falseAlarmMap
-//   2. فحص التكرار على الخريطة الصحيحة فقط
-//   3. الأوامر ترسل على نفس البورت 5555
-// ============================================================
 void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
 {
     auto payload = pkt->peekData<BytesChunk>();
@@ -58,18 +68,55 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
         reinterpret_cast<const char*>(payload->getBytes().data()),
         payload->getBytes().size());
 
-    // تجاهل الرسائل التي لا تهم GCS
-    bool isRealMine  = (msgText.find("CONFIRMED_REAL") != std::string::npos);
+    if (msgText.find("STATUS:uav=") == 0) {
+        size_t uavPos = msgText.find("uav=");
+        size_t xPos   = msgText.find(",x=");
+        size_t yPos   = msgText.find(",y=");
+        size_t covPos = msgText.find(",cov=");
+        size_t statePos= msgText.find(",state=");
+
+        if (uavPos != std::string::npos && xPos != std::string::npos &&
+            covPos != std::string::npos && statePos != std::string::npos)
+        {
+            try {
+                int uavId = std::stoi(msgText.substr(uavPos + 4, xPos - uavPos - 4));
+                double x = std::stod(msgText.substr(xPos + 3, yPos - xPos - 3));
+                double y = std::stod(msgText.substr(yPos + 3, covPos - yPos - 3));
+                double cov = std::stod(msgText.substr(covPos + 5, statePos - covPos - 5));
+                std::string state = msgText.substr(statePos + 7);
+
+                swarmStatus[uavId] = {Coord(x, y, 0), cov, state, simTime()};
+
+                const int G = 50;
+                const double S = 1000.0 / G;
+                int col = std::max(0, std::min(G - 1, (int)(x / S)));
+                int row = std::max(0, std::min(G - 1, (int)(y / S)));
+                globalVisitedCells.insert(col * G + row);
+                emit(globalCoverageSignal, (double)globalVisitedCells.size() / (G * G) * 100.0);
+
+                if (state == "SPIRAL") {
+                    Coord currentPos(x, y, 0);
+                    if (isDuplicate(realMineMap, currentPos, 50.0) || isDuplicate(falseAlarmMap, currentPos, 50.0)) {
+                        EV_INFO << "GCS: UAV[" << uavId << "] is performing SPIRAL in an already confirmed area. Sending CANCEL_SPIRAL.\n";
+                        sendCancelSpiral(uavId);
+                    }
+                }
+
+            } catch (...) {}
+        }
+        delete pkt;
+        return;
+    }
+
+    bool isRealMine  = (msgText.find("CONFIRMED_REAL") != std::string::npos) ||
+                       (msgText.find("SPIRAL_PEAK")    != std::string::npos);
     bool isFalseAlarm= (msgText.find("CONFIRMED_FA")   != std::string::npos);
 
     if (!isRealMine && !isFalseAlarm) { delete pkt; return; }
 
-    // استخراج الإحداثيات
-    // صيغة الرسالة: TYPE:uav=N,x=X.X,y=Y.Y,conf=C.CC,magVal=M.M,t=T.TT
     size_t xPos    = msgText.find(",x=");
     size_t yPos    = msgText.find(",y=");
-    size_t confPos = msgText.find(",conf=");   // [تم التصحيح]: كان ",conf" بدون "="
-    // magPos حُذف — confPos يكفي لتحديد نهاية y في السطر 81
+    size_t confPos = msgText.find(",conf=");
 
     if (xPos == std::string::npos || yPos == std::string::npos ||
         confPos == std::string::npos) {
@@ -82,15 +129,15 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
         Coord newPos(x, y, 0);
 
         if (isRealMine) {
-            // [تم التصحيح]: تحقق من التكرار في خريطة الألغام الحقيقية فقط
             if (!isDuplicate(realMineMap, newPos)) {
                 realMineMap.push_back(newPos);
                 EV_INFO << "GCS: REAL Mine #" << realMineMap.size()
                         << " at (" << x << ", " << y << ")\n";
-                sendCommandToSwarm(x, y);
+                if (msgText.find("SPIRAL_PEAK") == std::string::npos) {
+                    sendCommandToSwarm(x, y);
+                }
             }
         } else {
-            // [تم التصحيح]: تحقق من التكرار في خريطة الإنذارات الكاذبة فقط
             if (!isDuplicate(falseAlarmMap, newPos)) {
                 falseAlarmMap.push_back(newPos);
                 EV_INFO << "GCS: False Alarm #" << falseAlarmMap.size()
@@ -104,12 +151,77 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
     delete pkt;
 }
 
-// ============================================================
-// sendCommandToSwarm
-// [تم التصحيح الجذري]:
-//   المشكلة القديمة: broadcast 255.255.255.255 لا يصل في INET WiFi
-//   الحل: unicast مباشر لكل طائرة بعنوانها الحقيقي
-// ============================================================
+void GcsApp::coordinateSwarm()
+{
+    for (auto const& pair : swarmStatus) {
+        int uavId = pair.first;
+        const UavStatus& status = pair.second;
+
+        if (status.state == "RTH" && status.coveragePercent < 90.0) {
+            EV_INFO << "GCS: Detected UAV[" << uavId << "] returning home early with only "
+                    << status.coveragePercent << "% coverage!\n";
+
+            int bestHelper = -1;
+            double minDistance = 999999.0;
+
+            for (auto const& hPair : swarmStatus) {
+                int helperId = hPair.first;
+                const UavStatus& hStatus = hPair.second;
+
+                if (helperId != uavId && hStatus.state == "SCAN") {
+                    double dist = hStatus.lastPos.distance(status.lastPos);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        bestHelper = helperId;
+                    }
+                }
+            }
+
+            if (bestHelper != -1) {
+                EV_INFO << "GCS: Dispatching UAV[" << bestHelper << "] to assist in area of UAV["
+                        << uavId << "].\n";
+
+                char buf[128];
+                snprintf(buf, sizeof(buf), "CMD:REDIRECT,x=%.1f,y=%.1f", status.lastPos.x, status.lastPos.y);
+
+                try {
+                    std::string uavName = "uav[" + std::to_string(bestHelper) + "]";
+                    L3Address addr;
+                    L3AddressResolver().tryResolve(uavName.c_str(), addr);
+                    if (!addr.isUnspecified()) {
+                        auto payload = makeShared<BytesChunk>();
+                        std::vector<uint8_t> bytes(buf, buf + strlen(buf));
+                        payload->setBytes(bytes);
+                        auto *pkt = new Packet("RedirectCmd", payload);
+                        socket.sendTo(pkt, addr, destPort);
+                    }
+                } catch (...) {}
+
+                swarmStatus[uavId].coveragePercent = 100.0;
+            }
+        }
+    }
+}
+
+void GcsApp::sendCancelSpiral(int uavId)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "CMD:CANCEL_SPIRAL");
+
+    try {
+        std::string uavName = "uav[" + std::to_string(uavId) + "]";
+        L3Address addr;
+        L3AddressResolver().tryResolve(uavName.c_str(), addr);
+        if (!addr.isUnspecified()) {
+            auto payload = makeShared<BytesChunk>();
+            std::vector<uint8_t> bytes(buf, buf + strlen(buf));
+            payload->setBytes(bytes);
+            auto *pkt = new Packet("CancelSpiralCmd", payload);
+            socket.sendTo(pkt, addr, destPort);
+        }
+    } catch (...) {}
+}
+
 void GcsApp::sendCommandToSwarm(double x, double y)
 {
     char buf[128];
@@ -139,10 +251,6 @@ void GcsApp::sendCommandToSwarm(double x, double y)
             << " UAVs at (" << x << ", " << y << ")\n";
 }
 
-// ============================================================
-// refreshDisplay
-// [تم التصحيح]: يعرض أعداداً صحيحة من الخريطتين المنفصلتين
-// ============================================================
 void GcsApp::refreshDisplay() const
 {
     char buf[120];
@@ -154,9 +262,6 @@ void GcsApp::refreshDisplay() const
     getParentModule()->getDisplayString().setTagArg("i", 1, "red");
 }
 
-// ============================================================
-// finish
-// ============================================================
 void GcsApp::finish()
 {
     EV_INFO << "\n=== GCS Final Statistics ===\n";
@@ -165,6 +270,25 @@ void GcsApp::finish()
 
     recordScalar("gcs_realMines",   (double)realMineMap.size());
     recordScalar("gcs_falseAlarms", (double)falseAlarmMap.size());
+}
+
+void GcsApp::handleStartOperation(LifecycleOperation *op)
+{
+    if (coordinationTimer) cancelEvent(coordinationTimer);
+    if (!coordinationTimer) coordinationTimer = new cMessage("coordinationTimer");
+    scheduleAt(simTime() + 10.0, coordinationTimer);
+}
+
+void GcsApp::handleStopOperation(LifecycleOperation *op)
+{
+    if (coordinationTimer && coordinationTimer->isScheduled()) cancelEvent(coordinationTimer);
+    socket.close();
+}
+
+void GcsApp::handleCrashOperation(LifecycleOperation *op)
+{
+    if (coordinationTimer && coordinationTimer->isScheduled()) cancelEvent(coordinationTimer);
+    socket.destroy();
 }
 
 } // namespace uavminedetection
