@@ -33,7 +33,7 @@ struct CandidateMine {
 class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 {
   public:
-    virtual ~MineDetectionApp(); // الهادم لتنظيف الذاكرة بأمان
+    virtual ~MineDetectionApp();
 
   protected:
     int uavId = -1;
@@ -55,6 +55,10 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     inet::power::IEpEnergyStorage *energyStorage = nullptr;
     double returnHomeEnergyThreshold = 0.3;
+
+    double energyPerMeter = 0.21;
+    inet::Coord lastEnergyPosition;
+    double totalEnergyConsumed = 0.0;
 
     int destPort  = -1;
     int localPort = -1;
@@ -80,15 +84,11 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     static constexpr double GCS_X              = 500.0;
     static constexpr double GCS_Y              = 950.0;
     static constexpr double CRUISE_ALTITUDE    = 80.0;
-    // [FIX]: 30م→50م: عند 30م حطام WIRE/CAN/TOOL يعطي 277-442nT → إنذارات كاذبة كثيرة
-    //        عند 50م: حطام أقصاه 160nT (آمن) | ألغام 900-1800nT (مرئية جداً)
     static constexpr double SCAN_ALTITUDE      = 50.0;
     static constexpr double STATUS_INTERVAL    = 5.0;
-    static constexpr double RETURN_HOME_BEFORE = 50.0;
 
     std::vector<inet::Coord>   sharedMemory;
     std::vector<CandidateMine> candidateMines;
-
     std::set<int> visitedCells;
 
     int    trueDetections   = 0;
@@ -132,16 +132,13 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     void performScan();
     void broadcastStatus();
-    void sendNetworkMessage(const char* type, double x, double y,
-                            double confidence, double magneticValue);
+    void sendNetworkMessage(const char* type, double x, double y, double confidence, double magneticValue);
     double calculateCoverage();
 
     void initSensorVisuals();
     void updateSensorVisuals(double magVal, double uavX, double uavY) const;
-
     cFigure::Color getMagneticColor(double magVal, double threshold) const;
     double         getMagneticRadius(double magVal, double threshold) const;
-
     void addFalseAlarmFigure(double x, double y);
 
     void checkTimeouts();

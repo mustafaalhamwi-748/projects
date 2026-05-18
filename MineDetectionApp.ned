@@ -29,7 +29,9 @@ simple MineDetectionApp like IApp
 
         double sensorNoiseAlpha = default(0.8);
         double sensorNoiseScale = default(30.0);
+        
         double returnHomeEnergyThreshold = default(0.3);
+        double energyPerMeter = default(0.21);
 
         @signal[mineDetected](type=long);
         @signal[areaCoverage](type=double);
@@ -37,7 +39,6 @@ simple MineDetectionApp like IApp
         @signal[adaptiveThreshold](type=double);
         @signal[correlatedNoise](type=double);
 
-        // ── [NEW]: إشارات الإحصاءات البحثية الجديدة ─────────────
         @signal[timeToConfirm](type=simtime_t);
         @signal[uavsInvolved](type=long);
         @signal[confirmationConfidence](type=double);
@@ -48,7 +49,6 @@ simple MineDetectionApp like IApp
         @statistic[adaptiveThreshold](title="Adaptive Threshold (nT)"; record=mean,min,max,vector);
         @statistic[correlatedNoise](title="Correlated Sensor Noise (nT)"; record=mean,min,max,vector);
 
-        // ── [NEW]: تسجيل الإحصاءات الجديدة في النتائج ───────────
         @statistic[timeToConfirm](title="Time to Confirm Target (s)"; record=mean,max,vector);
         @statistic[uavsInvolved](title="UAVs Involved in Confirmation"; record=histogram,mean,vector);
         @statistic[confirmationConfidence](title="Confidence at Confirmation"; record=histogram,mean,vector);

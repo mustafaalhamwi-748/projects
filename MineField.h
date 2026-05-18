@@ -49,6 +49,9 @@ class MineField : public cSimpleModule
 
     int    getNearestUndiscoveredMine(double x, double y, double radius) const;
     int    getNearestMetalDebris(double x, double y, double radius) const;
+    // [NEW]: مثل getNearestMetalDebris لكن تشمل الشظايا المُعلَّمة triggered=true
+    // تُستخدم للتحقق من أن موقعاً ما تمت معالجته مسبقاً بواسطة UAV آخر
+    int    getNearestMetalDebrisAny(double x, double y, double radius) const;
     void   markDiscovered(int index);
     void   markDebrisTriggered(int index);
 

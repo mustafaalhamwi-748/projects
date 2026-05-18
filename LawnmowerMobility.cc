@@ -34,30 +34,22 @@ void LawnmowerMobility::setInitialPosition()
     lastPosition = inet::Coord(x1, y1, altitude);
 }
 
-// ============================================================
-// setTargetPosition
-// ── [MODIFIED]: أولوية Home > Spiral > Lawnmower
-// ============================================================
 void LawnmowerMobility::setTargetPosition()
 {
-    // ── 1. وضع العودة إلى القاعدة (RTH) ──────────────────────
     if (isHomeMode) {
-        // الطائرة تتجه مباشرة نحو GCS بخط مستقيم
         targetPosition = homeTarget;
         inet::Coord delta = targetPosition - lastPosition;
         double dist = delta.length();
 
         if (dist < 5.0) {
-            // وصلنا — نبقى عند القاعدة
             targetPosition = homeTarget;
-            nextChange = omnetpp::simTime() + 9999.0; // انتظار لا نهائي
+            nextChange = omnetpp::simTime() + 9999.0;
         } else {
             nextChange = omnetpp::simTime() + dist / speed;
         }
         return;
     }
 
-    // ── 2. وضع المسح الحلزوني (Spiral) ───────────────────────
     if (isSpiralMode) {
         currentAngle  += M_PI / 4;
         currentRadius += 3.0;
@@ -74,7 +66,6 @@ void LawnmowerMobility::setTargetPosition()
         return;
     }
 
-    // ── 3. وضع المسح الطبيعي (Lawnmower) ─────────────────────
     int sign;
     inet::Coord positionDelta = inet::Coord::ZERO;
 
@@ -94,31 +85,33 @@ void LawnmowerMobility::setTargetPosition()
     nextChange        = omnetpp::simTime() + positionDelta.length() / speed;
 }
 
-// ============================================================
-// startSpiral
-// ============================================================
 void LawnmowerMobility::startSpiral(double centerX, double centerY)
 {
     if (!isSpiralMode) {
         savedStep     = step;
-        savedPosition = lastPosition;
+        savedPosition = targetPosition;
     }
+
+    lastPosition = getCurrentPosition();
+    lastUpdate   = omnetpp::simTime();
+
     isSpiralMode  = true;
     spiralCenter  = inet::Coord(centerX, centerY, altitude);
     currentAngle  = 0;
     currentRadius = 5.0;
     speed         = originalSpeed * 0.5;
+
+    setTargetPosition();
 }
 
-// ============================================================
-// stopSpiral
-// ============================================================
 void LawnmowerMobility::stopSpiral()
 {
     isSpiralMode = false;
     speed        = originalSpeed;
     step         = savedStep;
+
     lastPosition = savedPosition;
+    lastUpdate   = omnetpp::simTime();
 
     inet::Coord positionDelta = inet::Coord::ZERO;
     switch (step % 4) {
@@ -134,77 +127,42 @@ void LawnmowerMobility::stopSpiral()
     step++;
     targetPosition   = lastPosition + positionDelta;
     targetPosition.z = altitude;
-    nextChange       = omnetpp::simTime()
-                     + positionDelta.length() / speed;
+    nextChange       = omnetpp::simTime() + positionDelta.length() / speed;
 }
 
-// ============================================================
-// [NEW] setAltitude
-// ──────────────────────────────────────────────────────────────
-// الحل الصحيح لتغيير الارتفاع فعلياً:
-//   par("altitude").setDoubleValue() وحده لا يكفي لأن altitude
-//   مخزَّن كـ member variable يُقرأ مرة واحدة في initialize()
-//   ولا يتحدث تلقائياً لاحقاً.
-//   هنا نغيّر المتغير الداخلي مباشرة → يؤثر فوراً على
-//   setTargetPosition() وstartSpiral() وكل حسابات Z اللاحقة.
-// ============================================================
 void LawnmowerMobility::setAltitude(double newAlt)
 {
-    altitude = newAlt;  // ← التحديث الفعلي الوحيد المهم
-
-    // تحديث constraintArea للتوافق مع INET internals
+    altitude = newAlt;
     par("constraintAreaMinZ").setDoubleValue(newAlt);
     par("constraintAreaMaxZ").setDoubleValue(newAlt);
 
-    // تحديث lastPosition.z فوراً في الوضع الطبيعي فقط
-    // (Spiral وHome يحسبان Z من spiralCenter/homeTarget — لا تدخل)
     if (!isSpiralMode && !isHomeMode)
         lastPosition.z = newAlt;
 
-    // [FIX]: في وضع الحلزون، حدّث مركز الحلزون ليطابق الارتفاع الجديد
-    // بدون هذا السطر، ستطير الطائرة حلزونياً على ارتفاع 80م رغم طلب 30م
     if (isSpiralMode)
         spiralCenter.z = newAlt;
-
-    EV_INFO << "LawnmowerMobility: altitude updated to " << newAlt << "m\n";
 }
 
-// ============================================================
-// [NEW] goHome
-// ──────────────────────────────────────────────────────────────
-// يُفعَّل من MineDetectionApp عند t=550s
-//
-// المنطق:
-//   1. إيقاف Spiral إذا كان نشطاً
-//   2. ضبط homeTarget على موضع GCS بالارتفاع المطلوب
-//   3. تفعيل isHomeMode → setTargetPosition ستتجه مباشرة
-//   4. تحديث altitude المتغير ليُستخدم في targetPosition.z
-// ============================================================
 void LawnmowerMobility::goHome(double homeX, double homeY, double homeAltitude)
 {
-    // إيقاف أي وضع سابق
-    isSpiralMode = false;
-    speed        = originalSpeed * 1.2; // أسرع قليلاً في العودة
+    lastPosition = getCurrentPosition();
+    lastUpdate   = omnetpp::simTime();
 
-    // تحديث الارتفاع
+    isSpiralMode = false;
+    speed        = originalSpeed * 1.2;
     altitude = homeAltitude;
 
-    // ضبط الهدف
     homeTarget  = inet::Coord(homeX, homeY, homeAltitude);
     isHomeMode  = true;
 
-    // تحديث فوري للهدف الحالي
     targetPosition = homeTarget;
     inet::Coord delta = homeTarget - lastPosition;
     double dist = delta.length();
+
     if (dist > 1.0)
         nextChange = omnetpp::simTime() + dist / speed;
     else
         nextChange = omnetpp::simTime() + 9999.0;
-
-    EV_INFO << "LawnmowerMobility: goHome() → ("
-            << homeX << ", " << homeY << ", " << homeAltitude
-            << ") at speed=" << speed << " m/s\n";
 }
 
 } // namespace uavminedetection

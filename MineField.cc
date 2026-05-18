@@ -165,6 +165,19 @@ int MineField::getNearestMetalDebris(double x, double y, double radius) const
     return best;
 }
 
+// [NEW]: تبحث في كل الشظايا بما فيها المُعلَّمة triggered=true
+// الغرض: اكتشاف ما إذا كانت شظية ما قد أُبلغ عنها مسبقاً بواسطة UAV آخر
+int MineField::getNearestMetalDebrisAny(double x, double y, double radius) const
+{
+    int best=-1; double bestDist=radius;
+    for (int i=0; i<(int)debris.size(); i++) {
+        // لا تتجاهل triggered — هذا هو الفرق الوحيد عن getNearestMetalDebris
+        double d=std::sqrt(std::pow(x-debris[i].x,2)+std::pow(y-debris[i].y,2));
+        if (d<bestDist) { bestDist=d; best=i; }
+    }
+    return best;
+}
+
 void MineField::markDiscovered(int index)
 {
     if (index>=0 && index<(int)mines.size()) mines[index].discovered=true;
