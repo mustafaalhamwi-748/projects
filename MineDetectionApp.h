@@ -26,9 +26,17 @@ namespace uavminedetection {
 struct CandidateMine {
     inet::Coord pos;
     simtime_t firstDetectedTime;
+    simtime_t lastDetectedTime;
     int firstDetectorId;
+    int hitCount;
     double confidence;
     double magVal;
+};
+
+struct CooldownRegion {
+    // منطقة تُحجب مؤقتاً بعد تأكيد إنذار كاذب لتقليل إعادة الإبلاغ.
+    inet::Coord pos;
+    simtime_t expiresAt;
 };
 
 class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
@@ -101,6 +109,7 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     // ── ذاكرة الكشف ──
     std::vector<inet::Coord>   sharedMemory;
     std::vector<CandidateMine> candidateMines;
+    std::vector<CooldownRegion> cooldownRegions;
     std::set<int> visitedCells;
 
     // ── إحصاءات ──
@@ -112,6 +121,18 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     int    falseAlarmFigureCount = 0;
 
     double confirmationTimeout = 30.0;
+    double minCandidateConfidence = 0.08;
+    double minConfirmConfidence   = 0.12;
+    int    minPersistentHits      = 2;
+    double minStabilityRatio      = 0.85;
+    double falseAlarmCooldown     = 12.0;
+    double cooldownRadius         = 35.0;
+
+    double adaptiveLowerPercentile = 0.45;
+    double adaptiveClipPercentile  = 0.85;
+    double adaptiveRecentWeight    = 0.08;
+    double adaptiveZoneSplitThreshold = 350.0;
+    double adaptiveZone2KBoost        = 0.15;
 
     // ── مرئيات اللوحة ──
     cOvalFigure     *sensorRingFigure  = nullptr;
@@ -158,6 +179,9 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     void addFalseAlarmFigure(double x, double y);
 
     void checkTimeouts();
+    void pruneCooldowns();
+    bool isInCooldownRegion(const inet::Coord& pos) const;
+    void addCooldownRegion(const inet::Coord& pos);
     void confirmTarget(inet::Coord targetPos, double confidence, double magVal);
     void startIntensiveSearch(double cmdX, double cmdY);
     void redirectToArea(double targetX, double targetY);

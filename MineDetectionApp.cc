@@ -14,6 +14,21 @@
 using namespace inet;
 
 namespace uavminedetection {
+namespace {
+CandidateMine makeCandidate(const Coord& pos, simtime_t now, int detectorId,
+                            double confidence, double magVal)
+{
+    CandidateMine cand;
+    cand.pos = pos;
+    cand.firstDetectedTime = now;
+    cand.lastDetectedTime = now;
+    cand.firstDetectorId = detectorId;
+    cand.hitCount = 1;
+    cand.confidence = confidence;
+    cand.magVal = magVal;
+    return cand;
+}
+}
 
 Define_Module(MineDetectionApp);
 
@@ -66,6 +81,12 @@ void MineDetectionApp::initialize(int stage)
         falseAlarmDisplayLimit = par("falseAlarmDisplayLimit");
         confirmRadius          = par("confirmRadius");
         confirmationTimeout    = par("confirmationTimeout");
+        minCandidateConfidence = par("minCandidateConfidence");
+        minConfirmConfidence   = par("minConfirmConfidence");
+        minPersistentHits      = (int)par("minPersistentHits");
+        minStabilityRatio      = par("minStabilityRatio");
+        falseAlarmCooldown     = par("falseAlarmCooldown");
+        cooldownRadius         = par("cooldownRadius");
         destPort           = par("destPort");
         localPort          = par("localPort");
 
@@ -81,6 +102,11 @@ void MineDetectionApp::initialize(int stage)
         useAdaptiveThreshold = par("useAdaptiveThreshold");
         adaptiveK            = par("adaptiveK");
         adaptiveWindowSize   = (int)par("adaptiveWindowSize");
+        adaptiveLowerPercentile   = par("adaptiveLowerPercentile");
+        adaptiveClipPercentile    = par("adaptiveClipPercentile");
+        adaptiveRecentWeight      = par("adaptiveRecentWeight");
+        adaptiveZoneSplitThreshold= par("adaptiveZoneSplitThreshold");
+        adaptiveZone2KBoost       = par("adaptiveZone2KBoost");
 
         // حساس العتبة الثابتة — يُنشأ دائماً (يُستخدم للرسوم حتى في وضع التكيف)
         sensor = new MagnetometerSensor(magneticThreshold, magneticSaturation);
@@ -89,7 +115,10 @@ void MineDetectionApp::initialize(int stage)
         if (useAdaptiveThreshold)
             adaptiveSensor = new AdaptiveMagnetometerSensor(
                 adaptiveK, adaptiveWindowSize,
-                magneticSaturation, magneticThreshold);
+                magneticSaturation, magneticThreshold,
+                adaptiveLowerPercentile, adaptiveClipPercentile,
+                adaptiveRecentWeight, adaptiveZoneSplitThreshold,
+                adaptiveZone2KBoost);
 
         WATCH(trueDetections);
         WATCH(falseAlarms);
@@ -335,6 +364,31 @@ void MineDetectionApp::updateSensorVisuals(double magVal, double uavX, double ua
 // ============================================================
 // checkTimeouts
 // ============================================================
+void MineDetectionApp::pruneCooldowns()
+{
+    for (auto it = cooldownRegions.begin(); it != cooldownRegions.end(); ) {
+        if (it->expiresAt <= simTime())
+            it = cooldownRegions.erase(it);
+        else
+            ++it;
+    }
+}
+
+bool MineDetectionApp::isInCooldownRegion(const inet::Coord& pos) const
+{
+    for (const auto& c : cooldownRegions) {
+        if (pos.distance(c.pos) <= cooldownRadius)
+            return true;
+    }
+    return false;
+}
+
+void MineDetectionApp::addCooldownRegion(const inet::Coord& pos)
+{
+    CooldownRegion c{pos, simTime() + falseAlarmCooldown};
+    cooldownRegions.push_back(c);
+}
+
 void MineDetectionApp::checkTimeouts()
 {
     auto it = candidateMines.begin();
@@ -342,9 +396,15 @@ void MineDetectionApp::checkTimeouts()
         if (it->firstDetectorId == uavId &&
             (simTime() - it->firstDetectedTime).dbl() > confirmationTimeout)
         {
-            emit(timeToConfirmSignal,  simTime() - it->firstDetectedTime);
-            emit(uavsInvolvedSignal,   1L);
-            confirmTarget(it->pos, it->confidence, it->magVal);
+            if (it->hitCount >= minPersistentHits &&
+                it->confidence >= minConfirmConfidence)
+            {
+                emit(timeToConfirmSignal,  simTime() - it->firstDetectedTime);
+                emit(uavsInvolvedSignal,   1L);
+                confirmTarget(it->pos, it->confidence, it->magVal);
+            } else {
+                duplicatesSkipped++;
+            }
             it = candidateMines.erase(it);
         } else {
             ++it;
@@ -383,6 +443,7 @@ void MineDetectionApp::confirmTarget(inet::Coord targetPos, double confidence, d
         falseAlarms++;
         emit(falseAlarmSignal, 1L);
         const auto& db = mineField->getDebris();
+        addCooldownRegion(Coord(db[debrisIdx].x, db[debrisIdx].y, 0));
         addFalseAlarmFigure(db[debrisIdx].x, db[debrisIdx].y);
         sendNetworkMessage("CONFIRMED_FA", targetPos.x, targetPos.y, confidence, magVal);
         return;
@@ -421,6 +482,7 @@ void MineDetectionApp::performScan()
 
     if (isReturningHome) return;
 
+    pruneCooldowns();
     checkTimeouts();
     Coord pos = mobility->getCurrentPosition();
 
@@ -483,17 +545,43 @@ void MineDetectionApp::performScan()
         reading = sensor->measure(magVal);            // العتبة الثابتة
 
     if (reading.isMine) {
+        if (reading.confidence < minCandidateConfidence || isInCooldownRegion(pos)) {
+            duplicatesSkipped++;
+            if (fmod(simTime().dbl(), 10.0) < scanInterval)
+                emit(coverageSignal, calculateCoverage());
+            scheduleAt(simTime() + scanInterval, scanTimer);
+            return;
+        }
+
         bool isAlreadyCandidate = false;
         for (auto it = candidateMines.begin(); it != candidateMines.end(); ++it) {
             if (pos.distance(it->pos) < confirmRadius) {
                 isAlreadyCandidate = true;
+                // نتأكد أن القراءة الجديدة ليست هبوطاً حاداً عن القمة السابقة
+                // حتى لا تؤدي القمم العابرة إلى تأكيدات كاذبة.
+                bool stableReading = (reading.magneticValue >=
+                    (it->magVal * minStabilityRatio));
+                if (stableReading) {
+                    it->hitCount++;
+                    it->lastDetectedTime = simTime();
+                    it->confidence = std::max(it->confidence, reading.confidence);
+                    it->magVal     = std::max(it->magVal, reading.magneticValue);
+                }
                 if (it->firstDetectorId != uavId) {
-                    emit(timeToConfirmSignal, simTime() - it->firstDetectedTime);
-                    emit(uavsInvolvedSignal,  2L);
-                    confirmTarget(it->pos, reading.confidence, reading.magneticValue);
-                    candidateMines.erase(it);
+                    if (stableReading &&
+                        it->hitCount >= minPersistentHits &&
+                        it->confidence >= minConfirmConfidence)
+                    {
+                        emit(timeToConfirmSignal, simTime() - it->firstDetectedTime);
+                        emit(uavsInvolvedSignal,  2L);
+                        confirmTarget(it->pos, it->confidence, it->magVal);
+                        candidateMines.erase(it);
+                    } else {
+                        duplicatesSkipped++;
+                    }
                 } else {
-                    duplicatesSkipped++;
+                    if (!stableReading)
+                        duplicatesSkipped++;
                 }
                 break;
             }
@@ -504,8 +592,9 @@ void MineDetectionApp::performScan()
             if (anyIdx >= 0 && mineField->getDebris()[anyIdx].triggered) {
                 duplicatesSkipped++;
             } else {
-                CandidateMine newCand = {pos, simTime(), uavId,
-                                        reading.confidence, reading.magneticValue};
+                CandidateMine newCand = makeCandidate(pos, simTime(), uavId,
+                                                      reading.confidence,
+                                                      reading.magneticValue);
                 candidateMines.push_back(newCand);
                 sendNetworkMessage("CANDIDATE", pos.x, pos.y,
                                    reading.confidence, reading.magneticValue);
@@ -774,7 +863,8 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
 
             if (senderUav != uavId) {
                 if (msgText.find("CANDIDATE") == 0) {
-                    CandidateMine cand = {incomingPos, simTime(), senderUav, parsedConf, parsedMag};
+                    CandidateMine cand = makeCandidate(incomingPos, simTime(),
+                                                       senderUav, parsedConf, parsedMag);
                     candidateMines.push_back(cand);
                 }
                 else if (msgText.find("CONFIRMED") == 0) {
@@ -785,6 +875,7 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
                             incomingPos.x, incomingPos.y, confirmRadius);
                         if (dIdx >= 0 && !mineField->getDebris()[dIdx].triggered)
                             mineField->markDebrisTriggered(dIdx);
+                        addCooldownRegion(incomingPos);
                     }
 
                     for (auto it = candidateMines.begin(); it != candidateMines.end(); ) {

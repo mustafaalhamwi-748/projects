@@ -27,7 +27,12 @@ class AdaptiveMagnetometerSensor
     AdaptiveMagnetometerSensor(double kFactor,
                                 int    windowSize,
                                 double saturation,
-                                double initialThreshold);
+                                double initialThreshold,
+                                double lowerPercentile = 0.45,
+                                double clipPercentile = 0.85,
+                                double recentWeight = 0.08,
+                                double zoneSplitThreshold = 350.0,
+                                double zone2KBoost = 0.15);
 
     // updateWindow=false أثناء وضع البحث المكثف (Spiral/Intensive)
     SensorReading measure(double magneticValue, bool updateWindow = true);
@@ -47,9 +52,16 @@ class AdaptiveMagnetometerSensor
     double initialThreshold;
     int    warmupSize;
     double maxThreshold;   // سقف أعلى لمنع الانفجار
+    double lowerPercentile;
+    double clipPercentile;
+    double recentWeight;
+    double zoneSplitThreshold;
+    double zone2KBoost;
+    int    thresholdUpdateCount = 0;
 
     std::deque<double> allReadingsWindow;
 
+    double percentileFromSorted(const std::vector<double>& sorted, double p) const;
     void updateThreshold();
 };
 

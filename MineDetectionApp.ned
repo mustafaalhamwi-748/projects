@@ -16,6 +16,12 @@ simple MineDetectionApp like IApp
 
         double confirmRadius       @unit(m)  = default(30m);
         double confirmationTimeout @unit(s)  = default(10s);
+        double minCandidateConfidence         = default(0.08);
+        double minConfirmConfidence           = default(0.12);
+        int    minPersistentHits              = default(2);
+        double minStabilityRatio              = default(0.85);
+        double falseAlarmCooldown @unit(s)    = default(12s);
+        double cooldownRadius     @unit(m)    = default(35m);
 
         double falseAlarmProb                = default(0.0001);
         int    falseAlarmDisplayLimit        = default(30);
@@ -41,6 +47,11 @@ simple MineDetectionApp like IApp
 
         // adaptiveWindowSize: حجم نافذة قراءات الخلفية (موصى به: 30 – 100)
         int    adaptiveWindowSize            = default(50);
+        double adaptiveLowerPercentile       = default(0.45);
+        double adaptiveClipPercentile        = default(0.85);
+        double adaptiveRecentWeight          = default(0.08);
+        double adaptiveZoneSplitThreshold    = default(350.0);
+        double adaptiveZone2KBoost           = default(0.15);
         // ────────────────────────────────────────────────────────────
 
         @signal[mineDetected](type=long);

@@ -1,12 +1,30 @@
 #include "AdaptiveMagnetometerSensor.h"
 
 namespace uavminedetection {
+namespace {
+// حدود حماية المعاملات لتثبيت سلوك الخوارزمية ومنع القيم المتطرفة.
+constexpr double MIN_LOWER_PERCENTILE = 0.2;
+constexpr double MAX_LOWER_PERCENTILE = 0.7;
+constexpr double MIN_CLIP_PERCENTILE = 0.55;
+constexpr double MAX_CLIP_PERCENTILE = 0.98;
+constexpr double MIN_RECENT_WEIGHT = 0.01;
+constexpr double MAX_RECENT_WEIGHT = 0.25;
+constexpr double MIN_ZONE2_K_BOOST = 0.0;
+constexpr double MAX_ZONE2_K_BOOST = 0.8;
+constexpr double MIN_GUARD_BAND_NT = 5.0; // nT
+constexpr double GUARD_BAND_RATIO = 0.03;
+}
 
 AdaptiveMagnetometerSensor::AdaptiveMagnetometerSensor(
     double kFactor,
     int    windowSize,
     double saturation,
-    double initialThreshold)
+    double initialThreshold,
+    double lowerPercentile,
+    double clipPercentile,
+    double recentWeight,
+    double zoneSplitThreshold,
+    double zone2KBoost)
   : kFactor(kFactor),
     windowSize(windowSize),
     saturation(saturation),
@@ -15,7 +33,12 @@ AdaptiveMagnetometerSensor::AdaptiveMagnetometerSensor(
     warmupSize(std::min(20, windowSize)),
     // سقف أمان مطلق فقط (90% من التشبع) — لا يُستخدم عادةً،
     // فقط حماية أخيرة من قيم غير منطقية.
-    maxThreshold(saturation * 0.9)
+    maxThreshold(saturation * 0.9),
+    lowerPercentile(std::clamp(lowerPercentile, MIN_LOWER_PERCENTILE, MAX_LOWER_PERCENTILE)),
+    clipPercentile(std::clamp(clipPercentile, MIN_CLIP_PERCENTILE, MAX_CLIP_PERCENTILE)),
+    recentWeight(std::clamp(recentWeight, MIN_RECENT_WEIGHT, MAX_RECENT_WEIGHT)),
+    zoneSplitThreshold(std::max(1.0, zoneSplitThreshold)),
+    zone2KBoost(std::clamp(zone2KBoost, MIN_ZONE2_K_BOOST, MAX_ZONE2_K_BOOST))
 {}
 
 // ============================================================
@@ -67,26 +90,85 @@ SensorReading AdaptiveMagnetometerSensor::measure(double magneticValue, bool upd
 // lowerHalf قريباً من 200nT، وفي منطقة صاخبة سيكون أعلى —
 // لكن دائماً أقل من قراءات الأهداف نفسها.
 // ============================================================
+double AdaptiveMagnetometerSensor::percentileFromSorted(const std::vector<double>& sorted, double p) const
+{
+    if (sorted.empty())
+        return initialThreshold;
+    p = std::clamp(p, 0.0, 1.0);
+    double pos = p * (sorted.size() - 1);
+    int lo = (int)std::floor(pos);
+    int hi = (int)std::ceil(pos);
+    if (lo == hi)
+        return sorted[lo];
+    double t = pos - lo;
+    return sorted[lo] + t * (sorted[hi] - sorted[lo]);
+}
+
 void AdaptiveMagnetometerSensor::updateThreshold()
 {
-    std::vector<double> sorted(allReadingsWindow.begin(),
-                                allReadingsWindow.end());
+    ++thresholdUpdateCount;
+
+    int fullN = (int)allReadingsWindow.size();
+    int growthSpan = std::max(1, windowSize - warmupSize);
+    // نزيد نافذة الخلفية تدريجياً حتى لا تقفز العتبة فجأة في بداية التشغيل.
+    int effectiveWindow = std::min(
+        fullN,
+        warmupSize + std::min(growthSpan, thresholdUpdateCount / 2));
+
+    std::vector<double> work;
+    work.reserve(effectiveWindow);
+    auto startIt = allReadingsWindow.end() - effectiveWindow;
+    for (auto it = startIt; it != allReadingsWindow.end(); ++it)
+        work.push_back(*it);
+
+    std::vector<double> sorted(work.begin(), work.end());
     std::sort(sorted.begin(), sorted.end());
 
-    int n = (int)sorted.size();
-    int halfN = std::max(5, n / 2);   // النصف الأدنى (حد أدنى 5 قيم)
+    int n = (int)work.size();
+    if (n < 5) {
+        currentThreshold = initialThreshold;
+        return;
+    }
 
-    double sum = 0.0;
-    for (int i = 0; i < halfN; i++) sum += sorted[i];
-    double mean = sum / halfN;
+    double backgroundCut = percentileFromSorted(sorted, lowerPercentile);
+    double clipValue     = percentileFromSorted(sorted, clipPercentile);
 
-    double sumSq = 0.0;
-    for (int i = 0; i < halfN; i++) sumSq += (sorted[i]-mean)*(sorted[i]-mean);
-    double stdDev = std::sqrt(sumSq / halfN);
+    double wSum = 0.0;
+    double weightedMean = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double v = std::min(work[i], clipValue);
+        if (v > backgroundCut)
+            continue;
+        double w = 1.0 + recentWeight * (i + 1);
+        wSum += w;
+        weightedMean += w * v;
+    }
+    if (wSum <= 0.0) {
+        currentThreshold = std::min(initialThreshold, maxThreshold);
+        return;
+    }
+    weightedMean /= wSum;
 
-    double newThreshold = mean + kFactor * stdDev;
-    // سقف أمان مطلق فقط
-    currentThreshold = std::min(newThreshold, maxThreshold);
+    double weightedVar = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double v = std::min(work[i], clipValue);
+        if (v > backgroundCut)
+            continue;
+        double w = 1.0 + recentWeight * (i + 1);
+        double d = v - weightedMean;
+        weightedVar += w * d * d;
+    }
+    double stdDev = std::sqrt(weightedVar / wSum);
+
+    double zoneK = kFactor;
+    if (weightedMean >= zoneSplitThreshold)
+        zoneK *= (1.0 + zone2KBoost);
+
+    double guardBand = std::max(MIN_GUARD_BAND_NT, GUARD_BAND_RATIO * weightedMean);
+    double minThreshold = std::max(initialThreshold * 0.9, weightedMean + guardBand);
+    double newThreshold = weightedMean + zoneK * stdDev + guardBand;
+
+    currentThreshold = std::min(std::max(newThreshold, minThreshold), maxThreshold);
 }
 
 } // namespace uavminedetection
