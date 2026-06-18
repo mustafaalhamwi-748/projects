@@ -3,6 +3,7 @@
 #include "inet/common/packet/Packet.h"
 #include "inet/networklayer/common/L3AddressResolver.h"
 #include "inet/networklayer/common/L3Address.h"
+#include "MineField.h"
 
 namespace uavminedetection {
 
@@ -90,7 +91,8 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
 
                 if (state == "SPIRAL") {
                     Coord currentPos(x, y, 0);
-                    if (isDuplicate(realMineMap, currentPos, 50.0) || isDuplicate(falseAlarmMap, currentPos, 50.0)) {
+                    // بعد
+                    if (isDuplicate(realMineMap, currentPos, 30.0) || isDuplicate(falseAlarmMap, currentPos, 5.0)) {
                         sendCancelSpiral(uavId);
                     }
                 }
@@ -125,7 +127,8 @@ void GcsApp::socketDataArrived(UdpSocket *, Packet *pkt)
                 sendCommandToSwarm(x, y);
             }
         } else {
-            if (!isDuplicate(falseAlarmMap, newPos)) {
+            // بعد
+            if (!isDuplicate(falseAlarmMap, newPos, 2.0)) {
                 falseAlarmMap.push_back(newPos);
             }
         }
@@ -233,12 +236,19 @@ void GcsApp::refreshDisplay() const
 
 void GcsApp::finish()
 {
-    EV_INFO << "\n=== GCS Final Statistics ===\n";
-    EV_INFO << "Total Real Mines Confirmed : " << realMineMap.size()   << "\n";
-    EV_INFO << "Total False Alarms         : " << falseAlarmMap.size() << "\n";
+    cModule *net = getParentModule()->getParentModule();
+      MineField *mf = dynamic_cast<MineField*>(net->getSubmodule("mineField"));
+      int actualDebris = mf ? mf->getNumDebris() : (int)falseAlarmMap.size();
+      if (coordinationTimer && coordinationTimer->isScheduled())
+              cancelEvent(coordinationTimer);
+      EV_INFO << "\n=== GCS Final Statistics ===\n";
+      EV_INFO << "Total Real Mines Confirmed : " << realMineMap.size()   << "\n";
+      EV_INFO << "Total False Alarms (Field) : " << actualDebris          << "\n";
+      EV_INFO << "False Alarms Detected      : " << falseAlarmMap.size() << "\n";
 
-    recordScalar("gcs_realMines",   (double)realMineMap.size());
-    recordScalar("gcs_falseAlarms", (double)falseAlarmMap.size());
+      recordScalar("gcs_realMines",          (double)realMineMap.size());
+      recordScalar("gcs_falseAlarms_actual", (double)actualDebris);
+      recordScalar("gcs_falseAlarms_detected",(double)falseAlarmMap.size());
 }
 
 void GcsApp::handleStartOperation(LifecycleOperation *op)
@@ -250,7 +260,8 @@ void GcsApp::handleStartOperation(LifecycleOperation *op)
 
 void GcsApp::handleStopOperation(LifecycleOperation *op)
 {
-    if (coordinationTimer && coordinationTimer->isScheduled()) cancelEvent(coordinationTimer);
+    if (coordinationTimer && coordinationTimer->isScheduled())
+        cancelEvent(coordinationTimer);   // ← يمنع أي استدعاء إضافي
     socket.close();
 }
 

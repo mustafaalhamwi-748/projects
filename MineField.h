@@ -77,6 +77,8 @@ class MineField : public cSimpleModule
 
     double magneticConstant;
     double backgroundNoise;
+    double backgroundNoiseZone2;   // [NEW] خلفية المنطقة الثانية
+    double zoneSplitX;             // [NEW] حد الفصل بين المنطقتين
     double noiseVariation;
 
     // معاملات التربة والعمق

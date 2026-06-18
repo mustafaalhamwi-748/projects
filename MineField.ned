@@ -13,8 +13,14 @@ simple MineField
         // ثابت المجال المغناطيسي (nT·m²)
         double magneticConstant = default(50000);
 
-        // ضوضاء الخلفية الطبيعية للتربة (nT)
+        // ضوضاء الخلفية الطبيعية للتربة (nT) — المنطقة الأولى (x < zoneSplitX)
         double backgroundNoise  = default(220);
+
+        // [NEW] ضوضاء الخلفية للمنطقة الثانية (x >= zoneSplitX) — تربة مختلفة
+        double backgroundNoiseZone2 = default(220);
+
+        // [NEW] الإحداثي X الذي يقسم الحقل بين المنطقتين (متر)
+        double zoneSplitX       = default(500);
 
         // تذبذب الضوضاء ± (nT)
         double noiseVariation   = default(50);

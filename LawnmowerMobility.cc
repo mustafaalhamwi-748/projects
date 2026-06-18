@@ -82,7 +82,14 @@ void LawnmowerMobility::setTargetPosition()
     step++;
     targetPosition    = lastPosition + positionDelta;
     targetPosition.z  = altitude;
-    nextChange        = omnetpp::simTime() + positionDelta.length() / speed;
+
+    // [FIX]: ضمان بقاء الهدف داخل حدود المنطقة
+    targetPosition.x = std::max(0.0, std::min(1000.0, targetPosition.x));
+    targetPosition.y = std::max(0.0, std::min(1000.0, targetPosition.y));
+
+    inet::Coord actualDelta = targetPosition - lastPosition;
+    double dist = actualDelta.length();
+    nextChange = omnetpp::simTime() + (dist > 0.1 ? dist / speed : 0.1);
 }
 
 void LawnmowerMobility::startSpiral(double centerX, double centerY)
@@ -110,7 +117,10 @@ void LawnmowerMobility::stopSpiral()
     speed        = originalSpeed;
     step         = savedStep;
 
-    lastPosition = savedPosition;
+    // [FIX]: استخدام الموضع الحالي الفعلي بدلاً من savedPosition
+    // savedPosition كان موضع الهدف قبل الحلزون وليس الموضع الحالي،
+    // مما كان يسبب تراكم خطأ يُخرج الطائرة من حدود المنطقة
+    lastPosition = getCurrentPosition();
     lastUpdate   = omnetpp::simTime();
 
     inet::Coord positionDelta = inet::Coord::ZERO;
@@ -127,7 +137,14 @@ void LawnmowerMobility::stopSpiral()
     step++;
     targetPosition   = lastPosition + positionDelta;
     targetPosition.z = altitude;
-    nextChange       = omnetpp::simTime() + positionDelta.length() / speed;
+
+    // [FIX]: تقييد الهدف داخل حدود المنطقة [0,1000]
+    targetPosition.x = std::max(0.0, std::min(1000.0, targetPosition.x));
+    targetPosition.y = std::max(0.0, std::min(1000.0, targetPosition.y));
+
+    inet::Coord actualDelta = targetPosition - lastPosition;
+    double dist = actualDelta.length();
+    nextChange = omnetpp::simTime() + (dist > 0.1 ? dist / speed : 0.1);
 }
 
 void LawnmowerMobility::setAltitude(double newAlt)

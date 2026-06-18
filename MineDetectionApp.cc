@@ -20,20 +20,39 @@ Define_Module(MineDetectionApp);
 simsignal_t MineDetectionApp::detectionSignal      = registerSignal("mineDetected");
 simsignal_t MineDetectionApp::coverageSignal       = registerSignal("areaCoverage");
 simsignal_t MineDetectionApp::falseAlarmSignal     = registerSignal("falseAlarm");
-simsignal_t MineDetectionApp::adaptiveThreshSignal = registerSignal("adaptiveThreshold");
 simsignal_t MineDetectionApp::correlatedNoiseSignal= registerSignal("correlatedNoise");
 simsignal_t MineDetectionApp::timeToConfirmSignal  = registerSignal("timeToConfirm");
 simsignal_t MineDetectionApp::uavsInvolvedSignal   = registerSignal("uavsInvolved");
 simsignal_t MineDetectionApp::confirmationConfidenceSignal = registerSignal("confirmationConfidence");
+simsignal_t MineDetectionApp::adaptiveThresholdSignal      = registerSignal("adaptiveThreshold"); // [NEW]
 
+// ============================================================
+// Destructor
+// ============================================================
 MineDetectionApp::~MineDetectionApp()
 {
-    if (scanTimer) { cancelAndDelete(scanTimer); scanTimer = nullptr; }
+    if (scanTimer)      { cancelAndDelete(scanTimer);      scanTimer      = nullptr; }
     if (intensiveTimer) { cancelAndDelete(intensiveTimer); intensiveTimer = nullptr; }
-    if (statusTimer) { cancelAndDelete(statusTimer); statusTimer = nullptr; }
-    if (sensor) { delete sensor; sensor = nullptr; }
+    if (statusTimer)    { cancelAndDelete(statusTimer);    statusTimer    = nullptr; }
+    if (endOfSimTimer)  { cancelAndDelete(endOfSimTimer);  endOfSimTimer  = nullptr; }
+    if (sensor)         { delete sensor;                   sensor         = nullptr; }
+    if (adaptiveSensor) { delete adaptiveSensor;           adaptiveSensor = nullptr; } // [NEW]
 }
 
+// ============================================================
+// getActiveThreshold — [NEW]
+// يُعيد العتبة الحالية المستخدمة في القرار
+// ============================================================
+double MineDetectionApp::getActiveThreshold() const
+{
+    if (useAdaptiveThreshold && adaptiveSensor)
+        return adaptiveSensor->getCurrentThreshold();
+    return sensor ? sensor->getThreshold() : magneticThreshold;
+}
+
+// ============================================================
+// initialize
+// ============================================================
 void MineDetectionApp::initialize(int stage)
 {
     ApplicationBase::initialize(stage);
@@ -50,24 +69,27 @@ void MineDetectionApp::initialize(int stage)
         destPort           = par("destPort");
         localPort          = par("localPort");
 
-        adaptiveWindowSize   = par("adaptiveWindowSize");
-        adaptiveKSigma       = par("adaptiveKSigma");
-        adaptiveMinThreshold = par("adaptiveMinThreshold");
-
         sensorNoiseAlpha = par("sensorNoiseAlpha");
         sensorNoiseScale = par("sensorNoiseScale");
         correlatedNoise  = 0.0;
 
         returnHomeEnergyThreshold = par("returnHomeEnergyThreshold");
         energyPerMeter            = par("energyPerMeter");
+        simTimeLimit              = par("simTimeLimit");
 
-        sensor = new MagnetometerSensor(
-            magneticThreshold,
-            magneticSaturation,
-            adaptiveWindowSize,
-            adaptiveKSigma,
-            adaptiveMinThreshold
-        );
+        // ── [NEW] معاملات العتبة التكيفية ──
+        useAdaptiveThreshold = par("useAdaptiveThreshold");
+        adaptiveK            = par("adaptiveK");
+        adaptiveWindowSize   = (int)par("adaptiveWindowSize");
+
+        // حساس العتبة الثابتة — يُنشأ دائماً (يُستخدم للرسوم حتى في وضع التكيف)
+        sensor = new MagnetometerSensor(magneticThreshold, magneticSaturation);
+
+        // [NEW] حساس التكيف — يُنشأ فقط إذا كان الوضع مُفعَّلاً
+        if (useAdaptiveThreshold)
+            adaptiveSensor = new AdaptiveMagnetometerSensor(
+                adaptiveK, adaptiveWindowSize,
+                magneticSaturation, magneticThreshold);
 
         WATCH(trueDetections);
         WATCH(falseAlarms);
@@ -76,6 +98,7 @@ void MineDetectionApp::initialize(int stage)
         WATCH(lastMagneticValue);
         WATCH(isIntensiveMode);
         WATCH(isReturningHome);
+        WATCH(useAdaptiveThreshold);   // [NEW]
     }
     else if (stage == INITSTAGE_APPLICATION_LAYER) {
         mineField = check_and_cast<MineField*>(
@@ -98,30 +121,41 @@ void MineDetectionApp::initialize(int stage)
 
         initSensorVisuals();
 
-        scanTimer       = new cMessage("scanTimer");
-        intensiveTimer  = new cMessage("intensiveTimer");
-        statusTimer     = new cMessage("statusTimer");
+        scanTimer      = new cMessage("scanTimer");
+        intensiveTimer = new cMessage("intensiveTimer");
+        statusTimer    = new cMessage("statusTimer");
+        endOfSimTimer  = new cMessage("endOfSimTimer");
 
         scheduleAt(simTime() + uniform(0, scanInterval), scanTimer);
         scheduleAt(simTime() + STATUS_INTERVAL, statusTimer);
+
+        double returnAt = simTimeLimit - 60.0;
+        if (returnAt > simTime().dbl() + 65.0)
+            scheduleAt(returnAt, endOfSimTimer);
     }
 }
 
+// ============================================================
+// setFlightAltitude
+// ============================================================
 void MineDetectionApp::setFlightAltitude(double altMeters)
 {
     auto *lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
     if (lawnmower) lawnmower->setAltitude(altMeters);
 }
 
+// ============================================================
+// initiateReturnHome
+// ============================================================
 void MineDetectionApp::initiateReturnHome()
 {
     if (isReturningHome) return;
 
     isReturningHome = true;
 
-    if (scanTimer && scanTimer->isScheduled())       cancelEvent(scanTimer);
+    if (scanTimer      && scanTimer->isScheduled())      cancelEvent(scanTimer);
     if (intensiveTimer && intensiveTimer->isScheduled()) cancelEvent(intensiveTimer);
-    if (statusTimer && statusTimer->isScheduled())   cancelEvent(statusTimer);
+    if (statusTimer    && statusTimer->isScheduled())    cancelEvent(statusTimer);
 
     if (isIntensiveMode) {
         isIntensiveMode = false;
@@ -147,12 +181,14 @@ void MineDetectionApp::initiateReturnHome()
     }
 }
 
+// ============================================================
+// initSensorVisuals
+// ============================================================
 void MineDetectionApp::initSensorVisuals()
 {
     cCanvas *canvas = getSystemModule()->getCanvas();
     Coord pos = mobility->getCurrentPosition();
-    double cx  = pos.x;
-    double cy  = pos.y;
+    double cx = pos.x, cy = pos.y;
 
     std::string ringName = "magRing_" + std::to_string(uavId);
     sensorRingFigure = new cOvalFigure(ringName.c_str());
@@ -195,38 +231,41 @@ void MineDetectionApp::initSensorVisuals()
     sensorValueFigure->setFont(cFigure::Font("", 9, cFigure::FONT_BOLD));
     canvas->addFigure(sensorValueFigure);
 
-    std::string thrName = "adaptiveThr_" + std::to_string(uavId);
-    adaptiveThreshFigure = new cTextFigure(thrName.c_str());
-    adaptiveThreshFigure->setPosition(cFigure::Point(dashX, dashY + 16));
-    adaptiveThreshFigure->setText("---");
-    adaptiveThreshFigure->setColor(cFigure::Color(100, 100, 100));
-    adaptiveThreshFigure->setAnchor(cFigure::ANCHOR_NW);
-    adaptiveThreshFigure->setFont(cFigure::Font("", 8, 0));
-    canvas->addFigure(adaptiveThreshFigure);
+    std::string thrName = "thr_" + std::to_string(uavId);
+    threshFigure = new cTextFigure(thrName.c_str());
+    threshFigure->setPosition(cFigure::Point(dashX, dashY + 16));
+    threshFigure->setText("---");
+    threshFigure->setColor(cFigure::Color(100, 100, 100));
+    threshFigure->setAnchor(cFigure::ANCHOR_NW);
+    threshFigure->setFont(cFigure::Font("", 8, 0));
+    canvas->addFigure(threshFigure);
 }
 
-cFigure::Color MineDetectionApp::getMagneticColor(double magVal, double threshold) const
+cFigure::Color MineDetectionApp::getMagneticColor(double magVal, double thr) const
 {
-    double ratio = magVal / threshold;
-    if (ratio < 0.8)       return cFigure::Color(0, 100, 255);
-    else if (ratio < 1.0)  return cFigure::Color(255, 200, 0);
-    else if (ratio < 1.5)  return cFigure::Color(255, 120, 0);
-    else                   return cFigure::Color(220, 0, 0);
+    double ratio = magVal / thr;
+    if      (ratio < 0.8) return cFigure::Color(0, 100, 255);
+    else if (ratio < 1.0) return cFigure::Color(255, 200, 0);
+    else if (ratio < 1.5) return cFigure::Color(255, 120, 0);
+    else                  return cFigure::Color(220, 0, 0);
 }
 
-double MineDetectionApp::getMagneticRadius(double magVal, double threshold) const
+double MineDetectionApp::getMagneticRadius(double magVal, double thr) const
 {
-    double ratio = magVal / threshold;
+    double ratio = magVal / thr;
     return 10.0 + std::min(18.0, ratio * 12.0);
 }
 
+// ============================================================
+// updateSensorVisuals — [MODIFIED] يعرض العتبة الفعّالة
+// ============================================================
 void MineDetectionApp::updateSensorVisuals(double magVal, double uavX, double uavY) const
 {
     if (!sensorRingFigure || !sensorValueFigure) return;
 
-    double effectiveThr = sensor->getThreshold();
-    cFigure::Color color = getMagneticColor(magVal, effectiveThr);
-    double R = getMagneticRadius(magVal, effectiveThr);
+    double activeThr = getActiveThreshold();   // [NEW] ثابتة أو تكيفية
+    cFigure::Color color = getMagneticColor(magVal, activeThr);
+    double R = getMagneticRadius(magVal, activeThr);
 
     sensorRingFigure->setBounds(cFigure::Rectangle(uavX-R, uavY-R, 2*R, 2*R));
 
@@ -251,9 +290,9 @@ void MineDetectionApp::updateSensorVisuals(double magVal, double uavX, double ua
         sensorRingFigure->setFillColor(color);
         sensorRingFigure->setLineColor(color);
         sensorRingFigure->setLineWidth(2);
-        sensorRingFigure->setFillOpacity((magVal >= effectiveThr) ? 0.35 : 0.18);
+        sensorRingFigure->setFillOpacity((magVal >= activeThr) ? 0.35 : 0.18);
 
-        if (magVal >= effectiveThr)
+        if (magVal >= activeThr)
             snprintf(valBuf, sizeof(valBuf), "UAV[%d]: ! %.0f nT", uavId, magVal);
         else
             snprintf(valBuf, sizeof(valBuf), "UAV[%d]: %.0f nT", uavId, magVal);
@@ -263,31 +302,39 @@ void MineDetectionApp::updateSensorVisuals(double magVal, double uavX, double ua
 
     sensorValueFigure->setText(valBuf);
 
-    if (adaptiveThreshFigure) {
-        char thrBuf[64];
-        if (sensor->isAdaptiveReady()) {
-            snprintf(thrBuf, sizeof(thrBuf), "Thr: %.0fnT (A) | Found: %d", effectiveThr, trueDetections);
-            adaptiveThreshFigure->setColor(cFigure::Color(0, 130, 0));
+    // [NEW] يعرض نوع العتبة ويُلوِّنها
+    if (threshFigure) {
+        char thrBuf[80];
+        if (useAdaptiveThreshold && adaptiveSensor) {
+            const char* warmupTag = adaptiveSensor->isWarmedUp() ? "" : " [WU]";
+            snprintf(thrBuf, sizeof(thrBuf),
+                     "AThr(k=%.1f): %.0fnT%s | F:%d",
+                     adaptiveK, activeThr, warmupTag, trueDetections);
+            threshFigure->setColor(cFigure::Color(0, 120, 60));   // أخضر داكن للتمييز
         } else {
-            snprintf(thrBuf, sizeof(thrBuf), "Thr: %.0fnT (W %d/%d)", effectiveThr, sensor->getWindowFill(), sensor->getWindowSize());
-            adaptiveThreshFigure->setColor(cFigure::Color(120, 120, 120));
+            snprintf(thrBuf, sizeof(thrBuf),
+                     "Thr: %.0fnT | Found: %d", activeThr, trueDetections);
+            threshFigure->setColor(cFigure::Color(0, 80, 0));
         }
-        adaptiveThreshFigure->setText(thrBuf);
+        threshFigure->setText(thrBuf);
     }
 
     if (sensorBarBg && sensorBarFg) {
         sensorBarBg->setBounds(cFigure::Rectangle(uavX-12, uavY+14, 24, 4));
-        double fillRatio = std::min(1.0, magVal / (1.5 * effectiveThr));
+        double fillRatio = std::min(1.0, magVal / (1.5 * activeThr));
         sensorBarFg->setBounds(cFigure::Rectangle(
             uavX-12, uavY+14, std::max(1.0, fillRatio * 24.0), 4));
         if (isReturningHome)
             sensorBarFg->setFillColor(cFigure::Color(150, 150, 150));
         else
             sensorBarFg->setFillColor(
-                isIntensiveMode ? cFigure::Color(255,0,0) : color);
+                isIntensiveMode ? cFigure::Color(255, 0, 0) : color);
     }
 }
 
+// ============================================================
+// checkTimeouts
+// ============================================================
 void MineDetectionApp::checkTimeouts()
 {
     auto it = candidateMines.begin();
@@ -295,9 +342,8 @@ void MineDetectionApp::checkTimeouts()
         if (it->firstDetectorId == uavId &&
             (simTime() - it->firstDetectedTime).dbl() > confirmationTimeout)
         {
-            emit(timeToConfirmSignal, simTime() - it->firstDetectedTime);
-            emit(uavsInvolvedSignal, 1L);
-
+            emit(timeToConfirmSignal,  simTime() - it->firstDetectedTime);
+            emit(uavsInvolvedSignal,   1L);
             confirmTarget(it->pos, it->confidence, it->magVal);
             it = candidateMines.erase(it);
         } else {
@@ -306,6 +352,9 @@ void MineDetectionApp::checkTimeouts()
     }
 }
 
+// ============================================================
+// confirmTarget
+// ============================================================
 void MineDetectionApp::confirmTarget(inet::Coord targetPos, double confidence, double magVal)
 {
     sharedMemory.push_back(targetPos);
@@ -314,8 +363,11 @@ void MineDetectionApp::confirmTarget(inet::Coord targetPos, double confidence, d
     int mineIdx = mineField->getNearestUndiscoveredMine(
         targetPos.x, targetPos.y, confirmRadius);
 
+    if (mineIdx < 0)
+        mineIdx = mineField->getNearestUndiscoveredMine(
+            targetPos.x, targetPos.y, confirmRadius * 1.8);
+
     if (mineIdx >= 0) {
-        // لغم حقيقي
         mineField->markDiscovered(mineIdx);
         trueDetections++;
         emit(detectionSignal, 1L);
@@ -323,12 +375,10 @@ void MineDetectionApp::confirmTarget(inet::Coord targetPos, double confidence, d
         return;
     }
 
-    // ===== تعديل: لا نبلغ عن إنذار كاذب إلا إذا وجدنا قطعة معدنية حقيقية =====
     int debrisIdx = mineField->getNearestMetalDebris(
         targetPos.x, targetPos.y, confirmRadius);
 
     if (debrisIdx >= 0) {
-        // قطعة معدنية غير مُعلَّمة → نُبلغ عنها
         mineField->markDebrisTriggered(debrisIdx);
         falseAlarms++;
         emit(falseAlarmSignal, 1L);
@@ -338,31 +388,30 @@ void MineDetectionApp::confirmTarget(inet::Coord targetPos, double confidence, d
         return;
     }
 
-    // هل هناك قطعة لكنها مُعلَّمة مسبقاً (طائرة أخرى سبقتنا)؟
     int anyIdx = mineField->getNearestMetalDebrisAny(
         targetPos.x, targetPos.y, confirmRadius);
     if (anyIdx >= 0) {
-        // القطعة معروفة مسبقاً – نتجاهل
         duplicatesSkipped++;
         return;
     }
 
-    // لا لغم ولا قطعة معدنية ضمن النطاق ← لا نفعل شيئاً (لا إنذار كاذب)
-    // (يمكننا تسجيله كـ "تجاهل" إذا أردت)
     duplicatesSkipped++;
 }
+
+// ============================================================
+// performScan — [MODIFIED] يختار الحساس حسب useAdaptiveThreshold
+// ============================================================
 void MineDetectionApp::performScan()
 {
+    // ── فحص الطاقة ──
     if (!isReturningHome && energyStorage) {
         Coord currentPos = mobility->getCurrentPosition();
         double dist = currentPos.distance(lastEnergyPosition);
-        if (dist > 0) {
-            totalEnergyConsumed += dist * energyPerMeter;
-        }
+        if (dist > 0) totalEnergyConsumed += dist * energyPerMeter;
         lastEnergyPosition = currentPos;
 
         double nominalCapacity = energyStorage->getNominalEnergyCapacity().get();
-        double remainingRatio = (nominalCapacity - totalEnergyConsumed) / nominalCapacity;
+        double remainingRatio  = (nominalCapacity - totalEnergyConsumed) / nominalCapacity;
 
         if (remainingRatio <= returnHomeEnergyThreshold) {
             initiateReturnHome();
@@ -375,6 +424,20 @@ void MineDetectionApp::performScan()
     checkTimeouts();
     Coord pos = mobility->getCurrentPosition();
 
+    // ── إنتاج القراءة المغناطيسية ──
+    double rawMagVal  = mineField->getMagneticValue(pos.x, pos.y, pos.z);
+    double innovation = uniform(-sensorNoiseScale, sensorNoiseScale);
+    correlatedNoise   = sensorNoiseAlpha * correlatedNoise + (1.0 - sensorNoiseAlpha) * innovation;
+    double magVal     = rawMagVal + correlatedNoise;
+    lastMagneticValue = magVal;
+
+    emit(correlatedNoiseSignal, correlatedNoise);
+
+    // ── [NEW] إرسال إشارة العتبة التكيفية لمتابعتها عبر الوقت ──
+    if (useAdaptiveThreshold && adaptiveSensor)
+        emit(adaptiveThresholdSignal, adaptiveSensor->getCurrentThreshold());
+
+    // ── فحص التكرار ──
     for (const auto& knownPos : sharedMemory) {
         if (pos.distance(knownPos) < confirmRadius) {
             duplicatesSkipped++;
@@ -383,79 +446,69 @@ void MineDetectionApp::performScan()
         }
     }
 
-    double rawMagVal = mineField->getMagneticValue(pos.x, pos.y, pos.z);
-    double innovation  = uniform(-sensorNoiseScale, sensorNoiseScale);
-    correlatedNoise    = sensorNoiseAlpha * correlatedNoise + (1.0 - sensorNoiseAlpha) * innovation;
-
-    double magVal = rawMagVal + correlatedNoise;
-    lastMagneticValue = magVal;
-
-    emit(correlatedNoiseSignal, correlatedNoise);
-
-    if(sensor) {
-        if (!isIntensiveMode && magVal < 500.0) {
-            sensor->addReading(magVal);
-        }
-        emit(adaptiveThreshSignal, sensor->getThreshold());
-    }
-
+    // ── وضع المسح الحلزوني ──
     if (isIntensiveMode) {
         if (magVal > maxSpiralMagVal) {
             maxSpiralMagVal = magVal;
-            maxSpiralPos = pos;
+            maxSpiralPos    = pos;
         }
 
-        if (sensor && magVal > (sensor->getThreshold() * spiralStopRatio)) {
-            if (intensiveTimer && intensiveTimer->isScheduled()) {
+        // [MODIFIED] نستخدم العتبة الفعّالة بدل sensor->getThreshold() مباشرة
+        double activeThr = getActiveThreshold();
+        if (magVal > (activeThr * spiralStopRatio)) {
+            if (intensiveTimer && intensiveTimer->isScheduled())
                 cancelEvent(intensiveTimer);
-            }
 
             isIntensiveMode = false;
-            auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
-            if (lawnmower) {
-                lawnmower->stopSpiral();
-            }
+            auto lawnmower  = dynamic_cast<LawnmowerMobility*>(mobility);
+            if (lawnmower) lawnmower->stopSpiral();
 
             confirmTarget(maxSpiralPos, 1.0, maxSpiralMagVal);
-            sendNetworkMessage("SPIRAL_PEAK", maxSpiralPos.x, maxSpiralPos.y, 1.0, maxSpiralMagVal);
+            sendNetworkMessage("SPIRAL_PEAK", maxSpiralPos.x, maxSpiralPos.y,
+                               1.0, maxSpiralMagVal);
             setFlightAltitude(CRUISE_ALTITUDE);
         }
     }
 
     updateSensorVisuals(magVal, pos.x, pos.y);
 
-    if (sensor) {
-        SensorReading reading = sensor->measure(magVal);
+    // ── [MODIFIED] اختيار الحساس الفعّال ──
+    SensorReading reading;
+    if (useAdaptiveThreshold && adaptiveSensor)
+        // [FIX] أثناء وضع البحث المكثف (Spiral)، لا تُضاف القراءة
+        // لنافذة الخلفية، لأنها تمثل إشارة هدف لا خلفية —
+        // إضافتها كانت تُسبب انفجار العتبة (Runaway Feedback).
+        reading = adaptiveSensor->measure(magVal, !isIntensiveMode);
+    else
+        reading = sensor->measure(magVal);            // العتبة الثابتة
 
-        if (reading.isMine) {
-            bool isAlreadyCandidate = false;
-            for (auto it = candidateMines.begin(); it != candidateMines.end(); ++it) {
-                if (pos.distance(it->pos) < confirmRadius) {
-                    isAlreadyCandidate = true;
-                    if (it->firstDetectorId != uavId) {
-                        emit(timeToConfirmSignal, simTime() - it->firstDetectedTime);
-                        emit(uavsInvolvedSignal, 2L);
-
-                        confirmTarget(it->pos, reading.confidence, reading.magneticValue);
-                        candidateMines.erase(it);
-                    } else {
-                        duplicatesSkipped++;
-                    }
-                    break;
-                }
-            }
-
-            if (!isAlreadyCandidate) {
-                // [FIX]: تحقق من الشظايا المُعلَّمة قبل إضافة candidate جديد
-                // إذا UAV آخر أكّد هذا الموقع كإنذار كاذب سابقاً، لا تُضف candidate
-                int anyIdx = mineField->getNearestMetalDebrisAny(pos.x, pos.y, confirmRadius);
-                if (anyIdx >= 0 && mineField->getDebris()[anyIdx].triggered) {
-                    duplicatesSkipped++;
+    if (reading.isMine) {
+        bool isAlreadyCandidate = false;
+        for (auto it = candidateMines.begin(); it != candidateMines.end(); ++it) {
+            if (pos.distance(it->pos) < confirmRadius) {
+                isAlreadyCandidate = true;
+                if (it->firstDetectorId != uavId) {
+                    emit(timeToConfirmSignal, simTime() - it->firstDetectedTime);
+                    emit(uavsInvolvedSignal,  2L);
+                    confirmTarget(it->pos, reading.confidence, reading.magneticValue);
+                    candidateMines.erase(it);
                 } else {
-                    CandidateMine newCand = {pos, simTime(), uavId, reading.confidence, reading.magneticValue};
-                    candidateMines.push_back(newCand);
-                    sendNetworkMessage("CANDIDATE", pos.x, pos.y, reading.confidence, reading.magneticValue);
+                    duplicatesSkipped++;
                 }
+                break;
+            }
+        }
+
+        if (!isAlreadyCandidate) {
+            int anyIdx = mineField->getNearestMetalDebrisAny(pos.x, pos.y, confirmRadius);
+            if (anyIdx >= 0 && mineField->getDebris()[anyIdx].triggered) {
+                duplicatesSkipped++;
+            } else {
+                CandidateMine newCand = {pos, simTime(), uavId,
+                                        reading.confidence, reading.magneticValue};
+                candidateMines.push_back(newCand);
+                sendNetworkMessage("CANDIDATE", pos.x, pos.y,
+                                   reading.confidence, reading.magneticValue);
             }
         }
     }
@@ -466,16 +519,20 @@ void MineDetectionApp::performScan()
     scheduleAt(simTime() + scanInterval, scanTimer);
 }
 
+// ============================================================
+// broadcastStatus
+// ============================================================
 void MineDetectionApp::broadcastStatus()
 {
     if (isReturningHome || gcsAddress.isUnspecified()) return;
 
-    Coord pos = mobility->getCurrentPosition();
+    Coord pos       = mobility->getCurrentPosition();
     double coverage = calculateCoverage();
 
     char buf[128];
     snprintf(buf, sizeof(buf), "STATUS:uav=%d,x=%.1f,y=%.1f,cov=%.2f,state=%s",
-             uavId, pos.x, pos.y, coverage, isIntensiveMode ? "SPIRAL" : "SCAN");
+             uavId, pos.x, pos.y, coverage,
+             isIntensiveMode ? "SPIRAL" : "SCAN");
 
     auto payload = makeShared<BytesChunk>();
     std::vector<uint8_t> bytes(buf, buf + strlen(buf));
@@ -484,6 +541,9 @@ void MineDetectionApp::broadcastStatus()
     socket.sendTo(pkt, gcsAddress, destPort);
 }
 
+// ============================================================
+// refreshDisplay
+// ============================================================
 void MineDetectionApp::refreshDisplay() const
 {
     if (mobility && sensorRingFigure) {
@@ -493,18 +553,22 @@ void MineDetectionApp::refreshDisplay() const
     getParentModule()->getDisplayString().setTagArg("t", 0, "");
 }
 
-void MineDetectionApp::sendNetworkMessage(const char* type, double x, double y, double confidence, double magneticValue)
+// ============================================================
+// sendNetworkMessage
+// ============================================================
+void MineDetectionApp::sendNetworkMessage(const char* type, double x, double y,
+                                          double confidence, double magneticValue)
 {
     char buf[160];
-    snprintf(buf, sizeof(buf), "%s:uav=%d,x=%.1f,y=%.1f,conf=%.2f,magVal=%.1f,t=%.2f",
+    snprintf(buf, sizeof(buf),
+             "%s:uav=%d,x=%.1f,y=%.1f,conf=%.2f,magVal=%.1f,t=%.2f",
              type, uavId, x, y, confidence, magneticValue, simTime().dbl());
 
     if (!gcsAddress.isUnspecified()) {
-        auto payload1 = makeShared<BytesChunk>();
-        std::vector<uint8_t> b1(buf, buf + strlen(buf));
-        payload1->setBytes(b1);
-        auto *pkt1 = new Packet("MineReport_GCS", payload1);
-        socket.sendTo(pkt1, gcsAddress, destPort);
+        auto payload = makeShared<BytesChunk>();
+        std::vector<uint8_t> b(buf, buf + strlen(buf));
+        payload->setBytes(b);
+        socket.sendTo(new Packet("MineReport_GCS", payload), gcsAddress, destPort);
     }
 
     cModule *net = getSystemModule();
@@ -519,34 +583,38 @@ void MineDetectionApp::sendNetworkMessage(const char* type, double x, double y, 
                 auto payloadU = makeShared<BytesChunk>();
                 std::vector<uint8_t> bU(buf, buf + strlen(buf));
                 payloadU->setBytes(bU);
-                auto *pktU = new Packet("MineReport_UAV", payloadU);
-                socket.sendTo(pktU, addr, destPort);
+                socket.sendTo(new Packet("MineReport_UAV", payloadU), addr, destPort);
             }
         } catch (...) {}
     }
     messagesSent++;
 }
 
+// ============================================================
+// calculateCoverage
+// ============================================================
 double MineDetectionApp::calculateCoverage()
 {
     const int    G = 50;
     const double S = 1000.0 / G;
 
     Coord pos = mobility->getCurrentPosition();
-    int col = (int)(pos.x / S);
-    int row = (int)(pos.y / S);
-    col = std::max(0, std::min(G - 1, col));
-    row = std::max(0, std::min(G - 1, row));
+    int col = std::max(0, std::min(G-1, (int)(pos.x / S)));
+    int row = std::max(0, std::min(G-1, (int)(pos.y / S)));
     visitedCells.insert(col * G + row);
     return (double)visitedCells.size() / (G * G) * 100.0;
 }
 
+// ============================================================
+// addFalseAlarmFigure
+// ============================================================
 void MineDetectionApp::addFalseAlarmFigure(double x, double y)
 {
     if (falseAlarmDisplayLimit >= 0 && falseAlarmFigureCount >= falseAlarmDisplayLimit) return;
 
     cCanvas *canvas = getSystemModule()->getCanvas();
-    std::string name = "fa_" + std::to_string(uavId) + "_" + std::to_string(falseAlarmFigureCount++);
+    std::string name = "fa_" + std::to_string(uavId) + "_"
+                     + std::to_string(falseAlarmFigureCount++);
     auto *grp = new cGroupFigure(name.c_str());
 
     auto *tri = new cPolygonFigure("tri");
@@ -565,6 +633,9 @@ void MineDetectionApp::addFalseAlarmFigure(double x, double y)
     canvas->addFigure(grp);
 }
 
+// ============================================================
+// startIntensiveSearch
+// ============================================================
 void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
 {
     if (isReturningHome) return;
@@ -573,11 +644,10 @@ void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
     if (pos.distance(Coord(cmdX, cmdY, 0)) < 200.0) {
         isIntensiveMode = true;
         maxSpiralMagVal = -1.0;
-        maxSpiralPos = pos;
+        maxSpiralPos    = pos;
 
         auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
-        if (lawnmower)
-            lawnmower->startSpiral(cmdX, cmdY);
+        if (lawnmower) lawnmower->startSpiral(cmdX, cmdY);
 
         setFlightAltitude(SCAN_ALTITUDE);
 
@@ -586,6 +656,9 @@ void MineDetectionApp::startIntensiveSearch(double cmdX, double cmdY)
     }
 }
 
+// ============================================================
+// redirectToArea
+// ============================================================
 void MineDetectionApp::redirectToArea(double targetX, double targetY)
 {
     if (isReturningHome) return;
@@ -594,9 +667,8 @@ void MineDetectionApp::redirectToArea(double targetX, double targetY)
     if (lawnmower) {
         if (isIntensiveMode) {
             isIntensiveMode = false;
-            if (intensiveTimer && intensiveTimer->isScheduled()) {
+            if (intensiveTimer && intensiveTimer->isScheduled())
                 cancelEvent(intensiveTimer);
-            }
             lawnmower->stopSpiral();
             setFlightAltitude(CRUISE_ALTITUDE);
         }
@@ -604,14 +676,24 @@ void MineDetectionApp::redirectToArea(double targetX, double targetY)
     }
 }
 
+// ============================================================
+// handleMessageWhenUp
+// ============================================================
 void MineDetectionApp::handleMessageWhenUp(cMessage *msg)
 {
     if (msg == scanTimer) {
         performScan();
     }
+    else if (msg == endOfSimTimer) {
+        if (!isReturningHome) {
+            EV_INFO << "UAV[" << uavId << "]: End-of-simulation RTH triggered at t="
+                    << simTime() << "\n";
+            initiateReturnHome();
+        }
+    }
     else if (msg == intensiveTimer) {
         isIntensiveMode = false;
-        auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
+        auto lawnmower  = dynamic_cast<LawnmowerMobility*>(mobility);
         if (lawnmower) lawnmower->stopSpiral();
         setFlightAltitude(CRUISE_ALTITUDE);
     }
@@ -627,6 +709,9 @@ void MineDetectionApp::handleMessageWhenUp(cMessage *msg)
     }
 }
 
+// ============================================================
+// socketDataArrived
+// ============================================================
 void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
 {
     auto payload = pkt->peekData<BytesChunk>();
@@ -634,39 +719,34 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
     std::string msgText(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
     if (msgText.find("CMD:INTENSIVE_SEARCH") == 0) {
-        size_t xP = msgText.find(",x=");
-        size_t yP = msgText.find(",y=");
+        size_t xP = msgText.find(",x="), yP = msgText.find(",y=");
         if (xP != std::string::npos && yP != std::string::npos) {
             try {
                 double cmdX = std::stod(msgText.substr(xP + 3, yP - xP - 3));
                 double cmdY = std::stod(msgText.substr(yP + 3));
                 startIntensiveSearch(cmdX, cmdY);
-            } catch(...) {}
+            } catch (...) {}
         }
         delete pkt; return;
     }
     else if (msgText.find("CMD:REDIRECT") == 0) {
-        size_t xP = msgText.find(",x=");
-        size_t yP = msgText.find(",y=");
+        size_t xP = msgText.find(",x="), yP = msgText.find(",y=");
         if (xP != std::string::npos && yP != std::string::npos) {
             try {
                 double tgtX = std::stod(msgText.substr(xP + 3, yP - xP - 3));
                 double tgtY = std::stod(msgText.substr(yP + 3));
                 redirectToArea(tgtX, tgtY);
-            } catch(...) {}
+            } catch (...) {}
         }
         delete pkt; return;
     }
     else if (msgText.find("CMD:CANCEL_SPIRAL") == 0) {
         if (isIntensiveMode) {
             isIntensiveMode = false;
-            if (intensiveTimer && intensiveTimer->isScheduled()) {
+            if (intensiveTimer && intensiveTimer->isScheduled())
                 cancelEvent(intensiveTimer);
-            }
             auto lawnmower = dynamic_cast<LawnmowerMobility*>(mobility);
-            if (lawnmower) {
-                lawnmower->stopSpiral();
-            }
+            if (lawnmower) lawnmower->stopSpiral();
             setFlightAltitude(CRUISE_ALTITUDE);
         }
         delete pkt; return;
@@ -680,13 +760,13 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
     size_t tPos    = msgText.find(",t=");
 
     if (uavPos != std::string::npos && xPos != std::string::npos &&
-        yPos != std::string::npos && confPos != std::string::npos &&
-        magPos != std::string::npos && tPos != std::string::npos)
+        yPos   != std::string::npos && confPos != std::string::npos &&
+        magPos != std::string::npos && tPos    != std::string::npos)
     {
         try {
-            int senderUav = std::stoi(msgText.substr(uavPos + 4, xPos - uavPos - 4));
-            double parsedX = std::stod(msgText.substr(xPos + 3, yPos - xPos - 3));
-            double parsedY = std::stod(msgText.substr(yPos + 3, confPos - yPos - 3));
+            int    senderUav  = std::stoi(msgText.substr(uavPos + 4, xPos - uavPos - 4));
+            double parsedX    = std::stod(msgText.substr(xPos + 3, yPos - xPos - 3));
+            double parsedY    = std::stod(msgText.substr(yPos + 3, confPos - yPos - 3));
             double parsedConf = std::stod(msgText.substr(confPos + 6, magPos - confPos - 6));
             double parsedMag  = std::stod(msgText.substr(magPos + 8, tPos - magPos - 8));
 
@@ -700,14 +780,11 @@ void MineDetectionApp::socketDataArrived(UdpSocket *, Packet *pkt)
                 else if (msgText.find("CONFIRMED") == 0) {
                     sharedMemory.push_back(incomingPos);
 
-                    // [FIX]: إذا كان التأكيد إنذاراً كاذباً، علّم الشظية فوراً
-                    // لمنع هذا الـ UAV من إضافة candidate أو تأكيد جديد لنفس الشظية
                     if (msgText.find("CONFIRMED_FA") == 0) {
                         int dIdx = mineField->getNearestMetalDebrisAny(
                             incomingPos.x, incomingPos.y, confirmRadius);
-                        if (dIdx >= 0 && !mineField->getDebris()[dIdx].triggered) {
+                        if (dIdx >= 0 && !mineField->getDebris()[dIdx].triggered)
                             mineField->markDebrisTriggered(dIdx);
-                        }
                     }
 
                     for (auto it = candidateMines.begin(); it != candidateMines.end(); ) {
@@ -727,24 +804,28 @@ void MineDetectionApp::socketErrorArrived(UdpSocket *, Indication *ind)
     delete ind;
 }
 
+// ============================================================
+// finish — [MODIFIED] يُسجِّل إحصاءات إضافية للعتبة التكيفية
+// ============================================================
 void MineDetectionApp::finish()
 {
     EV_INFO << "\n=== UAV[" << uavId << "] Final Statistics ===\n";
+    EV_INFO << "Threshold Mode    : "
+            << (useAdaptiveThreshold ? "ADAPTIVE" : "FIXED") << "\n";
     EV_INFO << "True Detections   : " << trueDetections   << "\n";
     EV_INFO << "False Alarms      : " << falseAlarms       << "\n";
     EV_INFO << "Duplicates Skipped: " << duplicatesSkipped << "\n";
     EV_INFO << "Messages Sent     : " << messagesSent      << "\n";
     EV_INFO << "Returned to Home  : " << (isReturningHome ? "YES" : "NO") << "\n";
 
-    if (sensor && sensor->isAdaptiveReady()) {
-        EV_INFO << "Final Adaptive Threshold: "
-                << sensor->getAdaptiveThreshold() << " nT"
-                << " (median=" << sensor->getWindowMean()
-                << " MAD_scaled=" << sensor->getWindowStdDev() << ")\n";
-    } else if (sensor) {
-        EV_INFO << "Adaptive Threshold: NOT REACHED (window only "
-                << sensor->getWindowFill() << "/" << sensor->getWindowSize()
-                << " filled — static threshold used throughout)\n";
+    if (useAdaptiveThreshold && adaptiveSensor) {
+        EV_INFO << "Final Adaptive Thr: " << adaptiveSensor->getCurrentThreshold()
+                << " nT  (k=" << adaptiveK
+                << ", window=" << adaptiveWindowSize << ")\n";
+        EV_INFO << "Warmed Up         : "
+                << (adaptiveSensor->isWarmedUp() ? "YES" : "NO") << "\n";
+    } else {
+        EV_INFO << "Static Threshold  : " << magneticThreshold << " nT\n";
     }
 
     if (uavId == 0) {
@@ -756,46 +837,62 @@ void MineDetectionApp::finish()
                    / mineField->getNumMines() * 100.0 << "%\n";
     }
 
-    // السجلات الرقمية (موجودة أساساً، أبقِها)
-    recordScalar("trueDetections",          trueDetections);
-    recordScalar("falseAlarms",             falseAlarms);
-    recordScalar("duplicatesSkipped",       duplicatesSkipped);
-    recordScalar("returnedHome",            isReturningHome ? 1.0 : 0.0);
-    if(sensor) {
-        recordScalar("finalAdaptiveThreshold",  sensor->getAdaptiveThreshold());
-        recordScalar("finalWindowMean",         sensor->getWindowMean());
-        recordScalar("finalWindowStdDev",       sensor->getWindowStdDev());
-    }
-    recordScalar("finalCorrelatedNoise",    correlatedNoise);
+    // ── Scalars الأصلية ──
+    recordScalar("trueDetections",    trueDetections);
+    recordScalar("falseAlarms",       falseAlarms);
+    recordScalar("duplicatesSkipped", duplicatesSkipped);
+    recordScalar("returnedHome",      isReturningHome ? 1.0 : 0.0);
+    recordScalar("finalCorrelatedNoise", correlatedNoise);
+
+    // ── [NEW] Scalars للمقارنة بين الوضعين ──
+    recordScalar("useAdaptiveThreshold", useAdaptiveThreshold ? 1.0 : 0.0);
+    recordScalar("staticThreshold",      magneticThreshold);
+
+    if (useAdaptiveThreshold && adaptiveSensor)
+        recordScalar("finalAdaptiveThreshold",
+                     adaptiveSensor->getCurrentThreshold());
+    else
+        recordScalar("finalAdaptiveThreshold", magneticThreshold);
 }
 
+// ============================================================
+// Lifecycle operations
+// ============================================================
 void MineDetectionApp::handleStartOperation(LifecycleOperation *)
 {
-    if (scanTimer)       cancelEvent(scanTimer);
-    if (intensiveTimer)  cancelEvent(intensiveTimer);
-    if (statusTimer)     cancelEvent(statusTimer);
+    if (scanTimer)      cancelEvent(scanTimer);
+    if (intensiveTimer) cancelEvent(intensiveTimer);
+    if (statusTimer)    cancelEvent(statusTimer);
+    if (endOfSimTimer)  cancelEvent(endOfSimTimer);
 
-    if (!scanTimer)       scanTimer       = new cMessage("scanTimer");
-    if (!intensiveTimer)  intensiveTimer  = new cMessage("intensiveTimer");
-    if (!statusTimer)     statusTimer     = new cMessage("statusTimer");
+    if (!scanTimer)      scanTimer      = new cMessage("scanTimer");
+    if (!intensiveTimer) intensiveTimer = new cMessage("intensiveTimer");
+    if (!statusTimer)    statusTimer    = new cMessage("statusTimer");
+    if (!endOfSimTimer)  endOfSimTimer  = new cMessage("endOfSimTimer");
 
     scheduleAt(simTime() + uniform(0, scanInterval), scanTimer);
     scheduleAt(simTime() + STATUS_INTERVAL, statusTimer);
+
+    double returnAt = simTimeLimit - 60.0;
+    if (returnAt > simTime().dbl() + 65.0)
+        scheduleAt(returnAt, endOfSimTimer);
 }
 
 void MineDetectionApp::handleStopOperation(LifecycleOperation *)
 {
-    if (scanTimer && scanTimer->isScheduled())           cancelEvent(scanTimer);
+    if (scanTimer      && scanTimer->isScheduled())      cancelEvent(scanTimer);
     if (intensiveTimer && intensiveTimer->isScheduled()) cancelEvent(intensiveTimer);
-    if (statusTimer && statusTimer->isScheduled())       cancelEvent(statusTimer);
+    if (statusTimer    && statusTimer->isScheduled())    cancelEvent(statusTimer);
+    if (endOfSimTimer  && endOfSimTimer->isScheduled())  cancelEvent(endOfSimTimer);
     socket.close();
 }
 
 void MineDetectionApp::handleCrashOperation(LifecycleOperation *)
 {
-    if (scanTimer && scanTimer->isScheduled())       cancelEvent(scanTimer);
+    if (scanTimer      && scanTimer->isScheduled())      cancelEvent(scanTimer);
     if (intensiveTimer && intensiveTimer->isScheduled()) cancelEvent(intensiveTimer);
-    if (statusTimer && statusTimer->isScheduled())   cancelEvent(statusTimer);
+    if (statusTimer    && statusTimer->isScheduled())    cancelEvent(statusTimer);
+    if (endOfSimTimer  && endOfSimTimer->isScheduled())  cancelEvent(endOfSimTimer);
     socket.destroy();
 }
 

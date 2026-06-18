@@ -11,6 +11,8 @@ void MineField::initialize()
 {
     magneticConstant = par("magneticConstant");
     backgroundNoise  = par("backgroundNoise");
+    backgroundNoiseZone2 = par("backgroundNoiseZone2");   // [NEW]
+    zoneSplitX       = par("zoneSplitX");                 // [NEW]
     noiseVariation   = par("noiseVariation");
 
     minDepth        = par("minDepth");
@@ -18,13 +20,18 @@ void MineField::initialize()
     soilAttenuation = par("soilAttenuation");
     soilTypeFactor  = par("soilTypeFactor");
 
+    // [NOTE]: آخر قطعتان (330,620) و (760,330) هما في الواقع قطع معدنية كبيرة
+    // (حديد ضخم مدفون من أدوات زراعية قديمة) لكنهما مُسجَّلتان هنا في mines
+    // لكي يُصنَّفهما النظام كألغام حقيقية (CONFIRMED_REAL → رمز أخضر + أمر بحث مكثف من GCS).
     struct { double x, y; } minePos[] = {
         {  80,  120}, { 220,  75}, { 380, 160}, { 530,  90},
         { 670, 190}, { 820, 110}, { 950, 210}, { 140, 310},
         { 290, 370}, { 460, 290}, { 610, 340}, { 760, 400},
         { 930, 320}, { 100, 520}, { 260, 550}, { 420, 490},
         { 580, 560}, { 740, 510}, { 890, 600}, { 180, 730},
-        { 340, 760}, { 510, 820}, { 680, 770}, { 840, 840}
+        { 340, 760}, { 510, 820}, { 680, 770}, { 840, 840},
+        // [NEW] قطعتان معدنيتان كبيرتان تُصنَّفان كألغام حقيقية
+        { 330, 620}, { 760, 330}
     };
     int nm = (int)(sizeof(minePos) / sizeof(minePos[0]));
     mines.clear();
@@ -100,7 +107,8 @@ void MineField::initialize()
         else if (m.depth < 0.30) medium++;
         else                      deep++;
     }
-    EV_INFO << "MineField: " << nm << " mines + " << nd << " debris placed.\n"
+    EV_INFO << "MineField: " << nm << " mines (منها 2 قطعة معدنية كبيرة تُصنَّف كألغام)"
+            << " + " << nd << " debris placed.\n"
             << "  Depth range : " << (minD*100) << "-" << (maxD*100) << " cm"
             << " | avg=" << (sumD/mines.size()*100) << " cm\n"
             << "  Shallow(<15cm)=" << shallow
@@ -112,7 +120,9 @@ void MineField::initialize()
 
 double MineField::getMagneticValue(double uavX, double uavY, double uavZ) const
 {
-    double noise = backgroundNoise
+    // [MODIFIED] خلفية مكانية غير متجانسة: منطقتان بضوضاء مختلفة
+    double localBackground = (uavX < zoneSplitX) ? backgroundNoise : backgroundNoiseZone2;
+    double noise = localBackground
                  + uniform(-noiseVariation / 2.0, noiseVariation / 2.0);
 
     double mineEffect = 0.0;
@@ -207,46 +217,62 @@ void MineField::createMineVisuals()
     cCanvas *canvas = getSystemModule()->getCanvas();
     const double R=7.0, Rsp=3.0;
     const double spOff[4][2]={{0,-R-Rsp},{0,R+Rsp},{R+Rsp,0},{-R-Rsp,0}};
+    // أول عنصر خارج الألغام الحقيقية — القطعتان الكبيرتان تبدآن من هذا الفهرس
+    const size_t LARGE_METAL_START = 24;
     mineFigures.clear();
 
     for (size_t i=0; i<mines.size(); i++) {
         double cx=mines[i].x, cy=mines[i].y;
-        cFigure::Color bodyColor = getMineColorByDepth(mines[i].depth);
-        cFigure::Color lineColor(
-            (int)(bodyColor.red*0.55),
-            (int)(bodyColor.green*0.55),
-            (int)(bodyColor.blue*0.55));
-
         auto *grp = new cGroupFigure(("mine_"+std::to_string(i)).c_str());
 
-        auto *body = new cOvalFigure("body");
-        body->setBounds(cFigure::Rectangle(cx-R,cy-R,2*R,2*R));
-        body->setFilled(true);
-        body->setFillColor(bodyColor);
-        body->setLineColor(lineColor);
-        body->setLineWidth(2);
-        grp->addFigure(body);
+        if (i >= LARGE_METAL_START) {
+            // ── قطعة معدنية كبيرة: مربع بلون TOOL_PART مطابق لبقية المخلفات ──
+            // sz=6 أكبر قليلاً من sz=4 للمخلفات العادية للدلالة على الحجم الكبير
+            const double sz = 6.0;
+            auto *sq = new cRectangleFigure("body");
+            sq->setBounds(cFigure::Rectangle(cx-sz, cy-sz, 2*sz, 2*sz));
+            sq->setFilled(true);
+            sq->setFillColor(cFigure::Color(120, 100, 80)); // نفس لون TOOL_PART
+            sq->setLineColor(cFigure::Color(80, 80, 80));
+            sq->setLineWidth(1);
+            grp->addFigure(sq);
+        } else {
+            // ── لغم حقيقي: الشكل الأصلي (دائرة + 4 نقاط) ──
+            cFigure::Color bodyColor = getMineColorByDepth(mines[i].depth);
+            cFigure::Color lineColor(
+                (int)(bodyColor.red*0.55),
+                (int)(bodyColor.green*0.55),
+                (int)(bodyColor.blue*0.55));
 
-        for (int s=0;s<4;s++) {
-            auto *sp=new cOvalFigure(("sp"+std::to_string(s)).c_str());
-            sp->setBounds(cFigure::Rectangle(
-                cx+spOff[s][0]-Rsp,cy+spOff[s][1]-Rsp,2*Rsp,2*Rsp));
-            sp->setFilled(true);
-            sp->setFillColor(bodyColor);
-            sp->setLineColor(lineColor);
-            sp->setLineWidth(1);
-            grp->addFigure(sp);
+            auto *body = new cOvalFigure("body");
+            body->setBounds(cFigure::Rectangle(cx-R,cy-R,2*R,2*R));
+            body->setFilled(true);
+            body->setFillColor(bodyColor);
+            body->setLineColor(lineColor);
+            body->setLineWidth(2);
+            grp->addFigure(body);
+
+            for (int s=0;s<4;s++) {
+                auto *sp=new cOvalFigure(("sp"+std::to_string(s)).c_str());
+                sp->setBounds(cFigure::Rectangle(
+                    cx+spOff[s][0]-Rsp,cy+spOff[s][1]-Rsp,2*Rsp,2*Rsp));
+                sp->setFilled(true);
+                sp->setFillColor(bodyColor);
+                sp->setLineColor(lineColor);
+                sp->setLineWidth(1);
+                grp->addFigure(sp);
+            }
+
+            char lblTxt[24];
+            snprintf(lblTxt, sizeof(lblTxt), "M%zu\n%.0fcm", i+1, mines[i].depth*100.0);
+            auto *lbl = new cTextFigure("label");
+            lbl->setPosition(cFigure::Point(cx,cy));
+            lbl->setText(lblTxt);
+            lbl->setColor(cFigure::Color("white"));
+            lbl->setAnchor(cFigure::ANCHOR_CENTER);
+            lbl->setFont(cFigure::Font("",5,cFigure::FONT_BOLD));
+            grp->addFigure(lbl);
         }
-
-        char lblTxt[24];
-        snprintf(lblTxt, sizeof(lblTxt), "M%zu\n%.0fcm", i+1, mines[i].depth*100.0);
-        auto *lbl = new cTextFigure("label");
-        lbl->setPosition(cFigure::Point(cx,cy));
-        lbl->setText(lblTxt);
-        lbl->setColor(cFigure::Color("white"));
-        lbl->setAnchor(cFigure::ANCHOR_CENTER);
-        lbl->setFont(cFigure::Font("",5,cFigure::FONT_BOLD));
-        grp->addFigure(lbl);
 
         canvas->addFigure(grp);
         mineFigures.push_back(grp);
@@ -337,22 +363,68 @@ void MineField::addLegend()
 
 void MineField::refreshDisplay() const
 {
-    for (size_t i=0;i<mineFigures.size()&&i<mines.size();i++) {
+    const size_t LARGE_METAL_START = 24;
+
+    for (size_t i = 0; i < mineFigures.size() && i < mines.size(); i++) {
         if (!mineFigures[i]) continue;
-        cFigure::Color fill, line;
-        if (mines[i].discovered) {
-            fill=cFigure::Color(0,210,0);
-            line=cFigure::Color(0,100,0);
+
+        if (i >= LARGE_METAL_START) {
+            // ── قطعة معدنية كبيرة ──────────────────────────────────────
+            if (mines[i].discovered) {
+                // هل لا يزال الشكل الأول مستطيلاً؟ (أي الاستبدال لم يحدث بعد)
+                auto *existingRect = (mineFigures[i]->getNumFigures() > 0)
+                    ? dynamic_cast<cRectangleFigure*>(mineFigures[i]->getFigure(0))
+                    : nullptr;
+
+                if (existingRect) {
+                    // ── احذف الشكل القديم (المستطيل) واستبدله بدائرة خضراء ──
+                    std::vector<cFigure*> toRemove;
+                    for (int j = 0; j < mineFigures[i]->getNumFigures(); j++)
+                        toRemove.push_back(mineFigures[i]->getFigure(j));
+                    for (auto *f : toRemove)
+                        mineFigures[i]->removeFigure(f);
+
+                    // دائرة خضراء بحجم أكبر من الألغام العادية (R=9 مقابل R=7)
+                    const double R = 9.0;
+                    double cx = mines[i].x, cy = mines[i].y;
+
+                    auto *oval = new cOvalFigure("body");
+                    oval->setBounds(cFigure::Rectangle(cx-R, cy-R, 2*R, 2*R));
+                    oval->setFilled(true);
+                    oval->setFillColor(cFigure::Color(0, 210, 0));
+                    oval->setLineColor(cFigure::Color(0, 100, 0));
+                    oval->setLineWidth(2);
+                    mineFigures[i]->addFigure(oval);
+
+                    auto *lbl = new cTextFigure("label");
+                    lbl->setPosition(cFigure::Point(cx, cy));
+                    lbl->setText("LM");
+                    lbl->setColor(cFigure::Color("white"));
+                    lbl->setAnchor(cFigure::ANCHOR_CENTER);
+                    lbl->setFont(cFigure::Font("", 5, cFigure::FONT_BOLD));
+                    mineFigures[i]->addFigure(lbl);
+                }
+                // إذا كانت الدائرة موجودة بالفعل — لا نفعل شيئاً
+            }
+            // غير مكتشفة: المستطيل يبقى كما هو
+
         } else {
-            fill=getMineColorByDepth(mines[i].depth);
-            line=cFigure::Color(
-                (int)(fill.red*0.55),
-                (int)(fill.green*0.55),
-                (int)(fill.blue*0.55));
-        }
-        for (int j=0;j<mineFigures[i]->getNumFigures();j++) {
-            auto *oval=dynamic_cast<cOvalFigure*>(mineFigures[i]->getFigure(j));
-            if (oval) { oval->setFillColor(fill); oval->setLineColor(line); }
+            // ── لغم حقيقي عادي ─────────────────────────────────────────
+            cFigure::Color fill, line;
+            if (mines[i].discovered) {
+                fill = cFigure::Color(0, 210, 0);
+                line = cFigure::Color(0, 100, 0);
+            } else {
+                fill = getMineColorByDepth(mines[i].depth);
+                line = cFigure::Color(
+                    (int)(fill.red*0.55),
+                    (int)(fill.green*0.55),
+                    (int)(fill.blue*0.55));
+            }
+            for (int j = 0; j < mineFigures[i]->getNumFigures(); j++) {
+                auto *oval = dynamic_cast<cOvalFigure*>(mineFigures[i]->getFigure(j));
+                if (oval) { oval->setFillColor(fill); oval->setLineColor(line); }
+            }
         }
     }
 #ifdef WITH_OSG

@@ -16,6 +16,7 @@
 
 #include "MineField.h"
 #include "MagnetometerSensor.h"
+#include "AdaptiveMagnetometerSensor.h"   // [NEW] العتبة التكيفية
 
 using namespace omnetpp;
 using namespace inet;
@@ -36,6 +37,7 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     virtual ~MineDetectionApp();
 
   protected:
+    // ── معاملات عامة ──
     int uavId = -1;
     double scanInterval = 0.5;
 
@@ -45,35 +47,44 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     int    falseAlarmDisplayLimit = 30;
     double confirmRadius = 25.0;
 
-    int    adaptiveWindowSize   = 50;
-    double adaptiveKSigma       = 3.0;
-    double adaptiveMinThreshold = 200.0;
-
     double sensorNoiseAlpha = 0.8;
     double sensorNoiseScale = 30.0;
     double correlatedNoise  = 0.0;
 
+    // ── طاقة ──
     inet::power::IEpEnergyStorage *energyStorage = nullptr;
     double returnHomeEnergyThreshold = 0.3;
-
     double energyPerMeter = 0.21;
     inet::Coord lastEnergyPosition;
     double totalEnergyConsumed = 0.0;
 
+    // ── شبكة ──
     int destPort  = -1;
     int localPort = -1;
     UdpSocket socket;
-
     inet::L3Address gcsAddress;
 
+    // ── مكونات النظام ──
     MineField         *mineField = nullptr;
-    MagnetometerSensor *sensor   = nullptr;
+    MagnetometerSensor *sensor   = nullptr;   // العتبة الثابتة
+
+    // ── [NEW] العتبة التكيفية ──
+    bool   useAdaptiveThreshold = false;
+    double adaptiveK            = 3.0;
+    int    adaptiveWindowSize   = 50;
+    AdaptiveMagnetometerSensor *adaptiveSensor = nullptr;
+
     IMobility         *mobility  = nullptr;
 
+    // ── مؤقتات ──
     cMessage *scanTimer       = nullptr;
     cMessage *intensiveTimer  = nullptr;
     cMessage *statusTimer     = nullptr;
+    cMessage *endOfSimTimer   = nullptr;
 
+    double simTimeLimit = 600.0;
+
+    // ── حالة الطيران ──
     bool isIntensiveMode  = false;
     bool isReturningHome  = false;
 
@@ -81,39 +92,43 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     inet::Coord maxSpiralPos;
     double spiralStopRatio = 1.2;
 
-    static constexpr double GCS_X              = 500.0;
-    static constexpr double GCS_Y              = 950.0;
-    static constexpr double CRUISE_ALTITUDE    = 80.0;
-    static constexpr double SCAN_ALTITUDE      = 50.0;
-    static constexpr double STATUS_INTERVAL    = 5.0;
+    static constexpr double GCS_X           = 500.0;
+    static constexpr double GCS_Y           = 950.0;
+    static constexpr double CRUISE_ALTITUDE = 80.0;
+    static constexpr double SCAN_ALTITUDE   = 50.0;
+    static constexpr double STATUS_INTERVAL = 5.0;
 
+    // ── ذاكرة الكشف ──
     std::vector<inet::Coord>   sharedMemory;
     std::vector<CandidateMine> candidateMines;
     std::set<int> visitedCells;
 
-    int    trueDetections   = 0;
-    int    falseAlarms      = 0;
-    int    duplicatesSkipped= 0;
-    int    messagesSent     = 0;
-    double lastMagneticValue= 0.0;
+    // ── إحصاءات ──
+    int    trueDetections    = 0;
+    int    falseAlarms       = 0;
+    int    duplicatesSkipped = 0;
+    int    messagesSent      = 0;
+    double lastMagneticValue = 0.0;
     int    falseAlarmFigureCount = 0;
 
     double confirmationTimeout = 30.0;
 
+    // ── مرئيات اللوحة ──
     cOvalFigure     *sensorRingFigure  = nullptr;
     cTextFigure     *sensorValueFigure = nullptr;
     cRectangleFigure *sensorBarBg      = nullptr;
     cRectangleFigure *sensorBarFg      = nullptr;
-    cTextFigure     *adaptiveThreshFigure = nullptr;
+    cTextFigure     *threshFigure      = nullptr;
 
+    // ── إشارات القياس ──
     static simsignal_t detectionSignal;
     static simsignal_t coverageSignal;
     static simsignal_t falseAlarmSignal;
-    static simsignal_t adaptiveThreshSignal;
     static simsignal_t correlatedNoiseSignal;
     static simsignal_t timeToConfirmSignal;
     static simsignal_t uavsInvolvedSignal;
     static simsignal_t confirmationConfidenceSignal;
+    static simsignal_t adaptiveThresholdSignal;   // [NEW]
 
   protected:
     virtual int numInitStages() const override { return NUM_INIT_STAGES; }
@@ -132,7 +147,8 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     void performScan();
     void broadcastStatus();
-    void sendNetworkMessage(const char* type, double x, double y, double confidence, double magneticValue);
+    void sendNetworkMessage(const char* type, double x, double y,
+                            double confidence, double magneticValue);
     double calculateCoverage();
 
     void initSensorVisuals();
@@ -148,6 +164,9 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
 
     void initiateReturnHome();
     void setFlightAltitude(double altitudeMeters);
+
+    // [NEW] العتبة الفعّالة حسب الوضع الحالي (ثابتة أم تكيفية)
+    double getActiveThreshold() const;
 };
 
 } // namespace uavminedetection

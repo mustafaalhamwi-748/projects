@@ -11,47 +11,61 @@ simple MineDetectionApp like IApp
 
         double scanInterval        @unit(s)  = default(0.5s);
 
-        double magneticThreshold             = default(500);
+        double magneticThreshold             = default(250);
         double magneticSaturation            = default(2000);
 
-        int    adaptiveWindowSize            = default(50);
-        double adaptiveKSigma               = default(3.0);
-        double adaptiveMinThreshold         = default(200.0);
+        double confirmRadius       @unit(m)  = default(30m);
+        double confirmationTimeout @unit(s)  = default(10s);
 
-        double confirmRadius       @unit(m)  = default(12m);
-        double confirmationTimeout @unit(s)  = default(30s);
-
-        double falseAlarmProb                = default(0.003);
-        int falseAlarmDisplayLimit           = default(50);
+        double falseAlarmProb                = default(0.0001);
+        int    falseAlarmDisplayLimit        = default(30);
 
         int    destPort                      = default(5555);
-        int    localPort                     = default(4000);
+        int    localPort                     = default(5555);
 
-        double sensorNoiseAlpha = default(0.8);
-        double sensorNoiseScale = default(30.0);
-        
-        double returnHomeEnergyThreshold = default(0.3);
-        double energyPerMeter = default(0.21);
+        double sensorNoiseAlpha              = default(0.8);
+        double sensorNoiseScale              = default(2.0);
+
+        double returnHomeEnergyThreshold     = default(0.3);
+        double energyPerMeter                = default(0.21);
+
+        double simTimeLimit        @unit(s)  = default(600s);
+
+        // ── [NEW] معاملات العتبة التكيفية ──────────────────────────
+        // useAdaptiveThreshold: false = عتبة ثابتة (الوضع الأصلي)
+        //                        true  = عتبة تكيفية (mean + k*sigma)
+        bool   useAdaptiveThreshold          = default(false);
+
+        // adaptiveK: عامل الانحراف المعياري (نطاق موصى به: 2.0 – 5.0)
+        double adaptiveK                     = default(3.0);
+
+        // adaptiveWindowSize: حجم نافذة قراءات الخلفية (موصى به: 30 – 100)
+        int    adaptiveWindowSize            = default(50);
+        // ────────────────────────────────────────────────────────────
 
         @signal[mineDetected](type=long);
         @signal[areaCoverage](type=double);
         @signal[falseAlarm](type=long);
-        @signal[adaptiveThreshold](type=double);
         @signal[correlatedNoise](type=double);
 
         @signal[timeToConfirm](type=simtime_t);
         @signal[uavsInvolved](type=long);
         @signal[confirmationConfidence](type=double);
 
+        // [NEW] قيمة العتبة التكيفية عبر الزمن
+        @signal[adaptiveThreshold](type=double);
+
         @statistic[mineDetected](title="Mine Detections"; record=count,sum,vector);
         @statistic[areaCoverage](title="Area Coverage %"; record=mean,max,vector);
         @statistic[falseAlarm](title="False Alarms"; record=count,sum);
-        @statistic[adaptiveThreshold](title="Adaptive Threshold (nT)"; record=mean,min,max,vector);
         @statistic[correlatedNoise](title="Correlated Sensor Noise (nT)"; record=mean,min,max,vector);
 
         @statistic[timeToConfirm](title="Time to Confirm Target (s)"; record=mean,max,vector);
         @statistic[uavsInvolved](title="UAVs Involved in Confirmation"; record=histogram,mean,vector);
         @statistic[confirmationConfidence](title="Confidence at Confirmation"; record=histogram,mean,vector);
+
+        // [NEW] تتبع تطور العتبة التكيفية عبر الزمن
+        @statistic[adaptiveThreshold](title="Adaptive Threshold (nT)"; record=mean,min,max,vector);
 
         @display("i=block/app2");
 
