@@ -2,6 +2,11 @@
 
 namespace uavminedetection {
 namespace {
+double clampValue(double value, double low, double high)
+{
+    return std::max(low, std::min(value, high));
+}
+
 // حدود حماية المعاملات لتثبيت سلوك الخوارزمية ومنع القيم المتطرفة.
 constexpr double MIN_LOWER_PERCENTILE = 0.2;
 constexpr double MAX_LOWER_PERCENTILE = 0.7;
@@ -34,11 +39,11 @@ AdaptiveMagnetometerSensor::AdaptiveMagnetometerSensor(
     // سقف أمان مطلق فقط (90% من التشبع) — لا يُستخدم عادةً،
     // فقط حماية أخيرة من قيم غير منطقية.
     maxThreshold(saturation * 0.9),
-    lowerPercentile(std::clamp(lowerPercentile, MIN_LOWER_PERCENTILE, MAX_LOWER_PERCENTILE)),
-    clipPercentile(std::clamp(clipPercentile, MIN_CLIP_PERCENTILE, MAX_CLIP_PERCENTILE)),
-    recentWeight(std::clamp(recentWeight, MIN_RECENT_WEIGHT, MAX_RECENT_WEIGHT)),
+    lowerPercentile(clampValue(lowerPercentile, MIN_LOWER_PERCENTILE, MAX_LOWER_PERCENTILE)),
+    clipPercentile(clampValue(clipPercentile, MIN_CLIP_PERCENTILE, MAX_CLIP_PERCENTILE)),
+    recentWeight(clampValue(recentWeight, MIN_RECENT_WEIGHT, MAX_RECENT_WEIGHT)),
     zoneSplitThreshold(std::max(1.0, zoneSplitThreshold)),
-    zone2KBoost(std::clamp(zone2KBoost, MIN_ZONE2_K_BOOST, MAX_ZONE2_K_BOOST))
+    zone2KBoost(clampValue(zone2KBoost, MIN_ZONE2_K_BOOST, MAX_ZONE2_K_BOOST))
 {}
 
 // ============================================================
@@ -94,7 +99,7 @@ double AdaptiveMagnetometerSensor::percentileFromSorted(const std::vector<double
 {
     if (sorted.empty())
         return initialThreshold;
-    p = std::clamp(p, 0.0, 1.0);
+    p = clampValue(p, 0.0, 1.0);
     double pos = p * (sorted.size() - 1);
     int lo = (int)std::floor(pos);
     int hi = (int)std::ceil(pos);
