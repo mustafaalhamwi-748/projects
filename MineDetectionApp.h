@@ -72,6 +72,9 @@ class MineDetectionApp : public ApplicationBase, public UdpSocket::ICallback
     bool   useAdaptiveThreshold = false;
     double adaptiveK            = 3.0;
     int    adaptiveWindowSize   = 50;
+    // [NEW] هامش ثقة إضافي (نانوتسلا) فوق العتبة التكيفية، يُشترط
+    // لإنشاء مرشح لغم — يُستخدم فقط مع useAdaptiveThreshold=true.
+    double adaptiveMinExcess    = 70.0;
     AdaptiveMagnetometerSensor *adaptiveSensor = nullptr;
 
     IMobility         *mobility  = nullptr;

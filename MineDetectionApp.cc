@@ -81,6 +81,7 @@ void MineDetectionApp::initialize(int stage)
         useAdaptiveThreshold = par("useAdaptiveThreshold");
         adaptiveK            = par("adaptiveK");
         adaptiveWindowSize   = (int)par("adaptiveWindowSize");
+        adaptiveMinExcess    = par("adaptiveMinExcess");   // [NEW]
 
         // حساس العتبة الثابتة — يُنشأ دائماً (يُستخدم للرسوم حتى في وضع التكيف)
         sensor = new MagnetometerSensor(magneticThreshold, magneticSaturation);
@@ -483,6 +484,29 @@ void MineDetectionApp::performScan()
         reading = sensor->measure(magVal);            // العتبة الثابتة
 
     if (reading.isMine) {
+        // ── [NEW] بوابة هامش الثقة — تُفعَّل فقط في الوضع التكيفي ──
+        //
+        // المشكلة: العتبة التكيفية تتبع الخلفية المحلية بدقة (CFAR)،
+        // فأي تجاوز بسيط جداً — حتى من شظية معدنية صغيرة (مسمار/سلك) —
+        // يُسجَّل كمرشح فوراً بنفس معاملة اللغم الحقيقي. هذا لا يحدث
+        // بنفس الحدة مع العتبة الثابتة لأن هامشها عادة أكبر من الخلفية.
+        //
+        // الحل: نشترط تجاوز العتبة التكيفية الحالية بمقدار لا يقل عن
+        // adaptiveMinExcess نانوتسلا قبل قبول القراءة كمرشح. إشارة
+        // اللغم الحقيقي عند نفس مدى الكشف أقوى بكثير من إشارة الشظايا
+        // الصغيرة، فهي تتجاوز هذا الهامش بسهولة — لذلك معدل اكتشاف
+        // الألغام لا يتأثر، بينما تُستبعد التجاوزات الهامشية القريبة
+        // من خط العتبة (مصدر معظم الإنذارات الكاذبة في الوضع التكيفي).
+        //
+        // [مهم] هذه البوابة معطّلة تماماً عندما useAdaptiveThreshold=false،
+        // فلا تؤثر بأي شكل على سلوك العتبة الثابتة.
+        bool passesConfidenceGate = true;
+        if (useAdaptiveThreshold && adaptiveSensor) {
+            double excess = magVal - adaptiveSensor->getCurrentThreshold();
+            passesConfidenceGate = (excess >= adaptiveMinExcess);
+        }
+
+        if (passesConfidenceGate) {
         bool isAlreadyCandidate = false;
         for (auto it = candidateMines.begin(); it != candidateMines.end(); ++it) {
             if (pos.distance(it->pos) < confirmRadius) {
@@ -510,6 +534,7 @@ void MineDetectionApp::performScan()
                 sendNetworkMessage("CANDIDATE", pos.x, pos.y,
                                    reading.confidence, reading.magneticValue);
             }
+        }
         }
     }
 
@@ -821,7 +846,8 @@ void MineDetectionApp::finish()
     if (useAdaptiveThreshold && adaptiveSensor) {
         EV_INFO << "Final Adaptive Thr: " << adaptiveSensor->getCurrentThreshold()
                 << " nT  (k=" << adaptiveK
-                << ", window=" << adaptiveWindowSize << ")\n";
+                << ", window=" << adaptiveWindowSize
+                << ", minExcess=" << adaptiveMinExcess << ")\n";
         EV_INFO << "Warmed Up         : "
                 << (adaptiveSensor->isWarmedUp() ? "YES" : "NO") << "\n";
     } else {
